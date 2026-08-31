@@ -1,0 +1,10 @@
+# YOLOv8 dataset config for single-class box detection.
+# Paths are relative to this file's directory (ultralytics resolves them
+# against `path` below), so this works regardless of where the repo is
+# checked out.
+path: dataset
+train: images/train
+val: images/val
+
+names:
+  0: box

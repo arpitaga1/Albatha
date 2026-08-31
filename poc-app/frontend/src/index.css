@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/*
+  Placeholder palette — teal accent echoes Albatha's brand color from the
+  RFP cover page, per project-plan.md §9 ("color theme and logo from the
+  RFP or client website"). Swap these for the client's exact brand values
+  once sourced; nothing else in the UI needs to change.
+*/
+:root {
+  --color-paper: #eef1f0;
+  --color-ink: #14181a;
+  --color-muted: #57635f;
+  --color-line: #d6dedb;
+  --color-accent: #0b7285;
+  --color-accent-ink: #0a5e6d;
+  --color-green: #2f6b4f;
+  --color-green-tint: #e4efe8;
+  --color-yellow: #a9722e;
+  --color-yellow-tint: #f3e9d9;
+  --color-red: #b3261e;
+  --color-red-tint: #fbe7e5;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}

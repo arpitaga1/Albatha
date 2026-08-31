@@ -1,0 +1,10 @@
+backend/poc.db
+backend/.env
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/.venv/
+
+frontend/node_modules/
+frontend/dist/
