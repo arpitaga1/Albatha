@@ -49,3 +49,13 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.75"))
 # confirmed, so it's opt-in, not silently on.
 EXTRACTION_MODE = os.environ.get("EXTRACTION_MODE", "mock")  # "mock" | "live"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
+# Comma-separated list of frontend origins allowed to call this API. Local
+# dev origins are always included so `npm run dev` keeps working without
+# any env var set; add the deployed frontend's real origin (e.g. a Vercel
+# URL) via ALLOWED_ORIGINS in production rather than hardcoding it, since
+# that URL isn't known until after the frontend's first deploy.
+ALLOWED_ORIGINS = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    *[o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()],
+]

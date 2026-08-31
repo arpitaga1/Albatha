@@ -1,6 +1,11 @@
 import type { AllShipmentsSummary, Dashboard, Invoice, InvoiceSummary, RealScanResponse, SapInvoiceRow, ValidationResult } from "./types";
 
-const BASE = "/api";
+// Local dev keeps hitting the relative "/api" path, which Vite's dev
+// server proxies to the local backend (see vite.config.ts) - nothing
+// changes there. A production build has no such proxy, so it needs the
+// deployed backend's real URL instead, via VITE_API_BASE_URL (set in
+// Vercel's project settings once the backend has a Render URL).
+const BASE = `${import.meta.env.VITE_API_BASE_URL ?? ""}/api`;
 
 // Every uploaded invoice document and scanned item photo is saved
 // server-side and served back read-only at /api/files/<name> — this turns

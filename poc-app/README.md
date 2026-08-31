@@ -62,9 +62,56 @@ npm run dev
 Open **http://localhost:5173**. It proxies `/api/*` to the backend on
 `:8000` — both must be running. You'll land on a login screen —
 **demo credentials are pre-filled**, just click Sign in
-(`demo@albatha-mpc.com` / `Demo@1234`). This is a dummy, frontend-only auth
-gate (no real backend auth), per the request to make the app feel like a
-real product rather than a bare testing tool.
+(`sara.almansoori@albatha-mpc.com` / `Demo@1234`). This is a dummy,
+frontend-only auth gate (no real backend auth), per the request to make the
+app feel like a real product rather than a bare testing tool.
+
+## Deployment
+
+This is a split deploy — a static Vite frontend and a stateful Python
+backend, on two different platforms, because the backend genuinely can't
+run on a serverless platform like Vercel: it persists to a local SQLite
+file, saves uploaded photos/invoices to local disk, and needs Tesseract's
+native OS binary — none of which survive (or are even installable) in a
+stateless serverless function.
+
+**Backend → Render** (or any host that runs a Dockerfile with persistent-ish
+disk — Railway, Fly.io, a plain VM all work the same way):
+
+1. `poc-app/backend/Dockerfile` installs Tesseract + OpenCV's runtime libs
+   at the OS level (neither is a pip package) before installing
+   `requirements.txt` — this is why a Docker-based deploy is required, not
+   Render's plain Python buildpack.
+2. Easiest path: Render → New → Blueprint, point it at this repo — it picks
+   up `render.yaml` (repo root) automatically, which already targets
+   `poc-app/backend/Dockerfile` on the free plan.
+3. Set env vars in Render's dashboard: `ALLOWED_ORIGINS` (the Vercel
+   frontend's URL, once you have it — comma-separate if there's more than
+   one), and `ANTHROPIC_API_KEY` only if you want `EXTRACTION_MODE=live`'s
+   invoice-OCR AI-vision fallback (item-photo extraction never needs it).
+4. Free-tier disk is ephemeral — `poc.db` and `uploads/` don't survive a
+   redeploy/restart. That's an accepted tradeoff here, not an oversight:
+   `seed_data.py` already re-seeds a full realistic demo state (8 invoices,
+   Tatmeen records, and a pre-scanned baseline for non-zero dashboard
+   numbers) automatically on every startup — a wipe just resets the demo to
+   its default state, it doesn't break anything.
+
+**Frontend → Vercel:**
+
+1. New Project → import this repo → set **Root Directory** to
+   `poc-app/frontend` (Vercel auto-detects the Vite framework preset from
+   there).
+2. Set the env var **`VITE_API_BASE_URL`** to the Render backend's URL, no
+   trailing slash (e.g. `https://albatha-mpc-backend.onrender.com`) — this
+   is what `src/api.ts` uses in place of the dev-only `/api` proxy.
+   `frontend/.env.example` documents this.
+3. `vercel.json` (already in `frontend/`) rewrites every path to
+   `index.html` — without it, refreshing on a client-side route like
+   `/validate/INV001` would 404, since there's no real server-side route
+   for it.
+4. Once both are live, go back to Render and set `ALLOWED_ORIGINS` to the
+   Vercel URL you just got (the backend's CORS config only allows
+   localhost by default) and redeploy the backend.
 
 ## The UI, end to end
 

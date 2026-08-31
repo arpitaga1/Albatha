@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: albatha-mpc-backend
+    runtime: docker
+    dockerfilePath: ./poc-app/backend/Dockerfile
+    dockerContext: ./poc-app/backend
+    plan: free
+    envVars:
+      # "mock" replays seeded results (no API cost); switch to "live" and
+      # set ANTHROPIC_API_KEY below to enable the invoice-OCR AI-vision
+      # fallback. Item-photo extraction never needs this either way.
+      - key: EXTRACTION_MODE
+        value: mock
+      # Set this once the Vercel frontend has a URL, e.g.
+      # https://albatha-mpc.vercel.app — comma-separate multiple origins.
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

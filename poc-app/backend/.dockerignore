@@ -1,0 +1,9 @@
+.env
+poc.db
+uploads/
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+yolo/
