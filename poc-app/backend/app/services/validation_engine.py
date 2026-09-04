@@ -407,12 +407,29 @@ def rule_cumulative_scan(invoice_qty: int, prior_total: int, current_scan_qty: i
 # ---------------------------------------------------------------------
 # Orchestration — the client's end-to-end pipeline (requirements doc §13)
 # ---------------------------------------------------------------------
+# "Manual Intervention Required" (red) is reserved for a real mismatch in
+# one of these 4 things — item count, GTIN, batch, or serial number —
+# per user directive. Everything else that can still produce a "fail"
+# finding (expiry, mfg/exp date sanity, Tatmeen reporting, SSCC, ...) is
+# real and worth surfacing, but only as a warning (yellow), never red on
+# its own. 4-image-quality-gate stays critical too — when the photo itself
+# is unusable, none of the other 4 can be assessed at all, so there's
+# nothing to warn about instead.
+_CRITICAL_RULES = {
+    "2-identity-matching",       # GTIN + Batch
+    "3-duplicate-check",         # Serial Number (within one scan)
+    "8-quantity-variance",       # Item count
+    "11-cross-scan-duplicates",  # Serial Number (across scans)
+    "4-image-quality-gate",      # nothing else can be assessed without this
+}
+
+
 def finalize_overall_status(result: LineItemValidation) -> None:
-    if any(f.severity == "fail" for f in result.findings):
+    if any(f.severity == "fail" and f.rule in _CRITICAL_RULES for f in result.findings):
         result.overall_status = "red"
     elif result.tatmeen_status == "yellow":
         result.overall_status = "yellow"
-    elif any(f.severity == "warning" for f in result.findings):
+    elif any(f.severity in ("warning", "fail") for f in result.findings):
         result.overall_status = "yellow"
     else:
         result.overall_status = "green"

@@ -6,6 +6,7 @@ import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import HistoryPage from "./pages/HistoryPage";
 import StartValidationPage from "./pages/StartValidationPage";
+import StartNewValidationPage from "./pages/StartNewValidationPage";
 import ValidationWizardPage from "./pages/ValidationWizardPage";
 import SsccDemoPage from "./pages/SsccDemoPage";
 
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/dashboard" element={<Protected><DashboardPage /></Protected>} />
         <Route path="/history" element={<Protected><HistoryPage /></Protected>} />
         <Route path="/validate" element={<Protected><StartValidationPage /></Protected>} />
+        <Route path="/validate-new" element={<Protected><StartNewValidationPage /></Protected>} />
         <Route path="/validate/:invoiceNumber" element={<Protected><ValidationWizardPage /></Protected>} />
         <Route path="/sscc-demo" element={<Protected><SsccDemoPage /></Protected>} />
       </Routes>

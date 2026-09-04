@@ -129,7 +129,7 @@ export default function StartValidationPage() {
           >
             <PlugZap size={17} className="text-white" strokeWidth={2.25} />
           </div>
-          <h1 className="text-2xl font-bold">Start Validation</h1>
+          <h1 className="text-2xl font-bold">Upload Invoice</h1>
         </div>
         <p className="text-sm text-[var(--color-muted)] mb-6 max-w-2xl">
           Pick an invoice already in the system, or upload a new one - either path runs the same

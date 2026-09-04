@@ -1,14 +1,16 @@
 import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
+import { LayoutDashboard, ScanLine, History, UploadCloud, Layers } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import albathaLogo from "../assets/albatha-logo.png";
 
 const NAV = [
-  { to: "/dashboard", label: "Dashboard", icon: "▦" },
-  { to: "/validate", label: "Start Validation", icon: "➕" },
-  { to: "/history", label: "History", icon: "☷" },
-  { to: "/sscc-demo", label: "SSCC Proof", icon: "◈" },
+  { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { to: "/validate-new", label: "Start Validation", icon: ScanLine },
+  { to: "/history", label: "History", icon: History },
+  { to: "/validate", label: "Upload Invoice", icon: UploadCloud },
+  { to: "/sscc-demo", label: "SSCC Proof", icon: Layers },
 ];
 
 export default function AppShell({ children }: { children: ReactNode }) {
@@ -40,6 +42,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
               <NavLink
                 key={item.to}
                 to={item.to}
+                end
                 className={({ isActive }) =>
                   `relative flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                     isActive ? "text-white" : "text-[#8fbdb9] hover:text-white"
@@ -56,7 +59,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
                         transition={{ type: "spring", stiffness: 400, damping: 32 }}
                       />
                     )}
-                    <span className="relative">{item.icon}</span>
+                    <item.icon size={16} strokeWidth={2} className="relative shrink-0" />
                     <span className="relative">{item.label}</span>
                   </>
                 )}

@@ -71,7 +71,7 @@ function discrepancyRows(lineItem: LineItem, result: ValidationResult) {
         expected = `${lineItem.qty} ${lineItem.uom}`;
         detected = `${result.cumulative.total_scanned} ${lineItem.uom}`;
         const shortfallRatio = lineItem.qty > 0 ? result.cumulative.total_scanned / lineItem.qty : 1;
-        if (lineItem.qty >= 10 && shortfallRatio < 0.85) {
+        if (shortfallRatio < 0.85) {
           action = "For a densely packed carton, a gap this size can come from the photo's resolution " +
             "limiting how many codes are legible, not necessarily missing stock. Retake in closer, " +
             "smaller sections (fewer boxes per photo) - multiple photos combine into one result " +
@@ -118,7 +118,7 @@ export default function ItemDetailModal({
 
   if (!result) {
     return (
-      <Modal open={open} onClose={onClose} title={lineItem.item_name}>
+      <Modal open={open} onClose={onClose} title={lineItem.item_name} fullScreen>
         <p className="text-sm text-[var(--color-muted)]">Not scanned yet - upload or scan a photo covering this item first.</p>
       </Modal>
     );
@@ -129,6 +129,14 @@ export default function ItemDetailModal({
   const rows = discrepancyRows(lineItem, r);
   const photoUrl = fileUrl(scanned?.image_name);
   const annotatedUrl = fileUrl(scanned?.annotated_image_name);
+  // "Human Intervention Required" (red) is reserved for a real
+  // item-count/GTIN/batch/serial mismatch - overall_status is already
+  // red-only-for-those per validation_engine.py's finalize_overall_status.
+  // Any other issue (expiry, date-sanity, Tatmeen, SSCC, ...) still shows
+  // here, just as a warning rather than a critical/red banner.
+  const isCritical = r.overall_status === "red";
+  const bannerColor = isCritical ? "var(--color-red)" : "var(--color-yellow)";
+  const bannerTint = isCritical ? "var(--color-red-tint)" : "var(--color-yellow-tint)";
 
   function startEditing() {
     setEditGtin(scanned?.gtin ?? "");
@@ -154,43 +162,60 @@ export default function ItemDetailModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={lineItem.item_name} wide>
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <div className="flex items-center gap-2.5 flex-wrap">
-          {photoUrl && (
-            <a
-              href={photoUrl} target="_blank" rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full transition-colors"
-              style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}
+    <Modal open={open} onClose={onClose} title={lineItem.item_name} fullScreen>
+      <div className="flex flex-col lg:flex-row gap-5">
+        {/* --- Left: the actual scanned photo, ~25% --- */}
+        <div className="lg:w-1/4 shrink-0">
+          {photoUrl ? (
+            <div className="rounded-lg overflow-hidden border" style={{ borderColor: "var(--color-line)" }}>
+              <img src={photoUrl} alt={`Scanned photo for ${lineItem.item_name}`} className="w-full block" />
+              <div className="p-2.5 flex flex-col gap-1.5" style={{ background: "var(--color-paper)" }}>
+                <a
+                  href={photoUrl} target="_blank" rel="noreferrer"
+                  className="inline-flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full transition-colors"
+                  style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}
+                >
+                  <ImageIcon size={11} strokeWidth={2.5} />
+                  Open full size
+                  <ExternalLink size={10} strokeWidth={2.5} />
+                </a>
+                {annotatedUrl && (
+                  <a
+                    href={annotatedUrl} target="_blank" rel="noreferrer"
+                    className="inline-flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full transition-colors"
+                    style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
+                    title="See exactly which regions OpenCV detected as individual items, numbered in detection order."
+                  >
+                    <ScanSearch size={11} strokeWidth={2.5} />
+                    View detected boxes
+                    <ExternalLink size={10} strokeWidth={2.5} />
+                  </a>
+                )}
+                {scanned?.method === "opencv" && (
+                  <span
+                    className="inline-flex items-center justify-center gap-1 text-[11px] font-semibold px-2 py-1 rounded-full"
+                    style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
+                    title="Barcode was not decodable in this photo - detected via OpenCV + local OCR instead (no AI vision, no API key)."
+                  >
+                    <ScanSearch size={11} strokeWidth={2.5} />
+                    Detected via OpenCV
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div
+              className="rounded-lg border flex items-center justify-center py-16 px-4 text-center text-xs text-[var(--color-muted)]"
+              style={{ borderColor: "var(--color-line)" }}
             >
-              <ImageIcon size={11} strokeWidth={2.5} />
-              View scanned photo
-              <ExternalLink size={10} strokeWidth={2.5} />
-            </a>
-          )}
-          {annotatedUrl && (
-            <a
-              href={annotatedUrl} target="_blank" rel="noreferrer"
-              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full transition-colors"
-              style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
-              title="See exactly which regions OpenCV detected as individual items, numbered in detection order."
-            >
-              <ScanSearch size={11} strokeWidth={2.5} />
-              View detected boxes
-              <ExternalLink size={10} strokeWidth={2.5} />
-            </a>
-          )}
-          {scanned?.method === "opencv" && (
-            <span
-              className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full"
-              style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
-              title="Barcode was not decodable in this photo - detected via OpenCV + local OCR instead (no AI vision, no API key)."
-            >
-              <ScanSearch size={11} strokeWidth={2.5} />
-              Detected via OpenCV
-            </span>
+              No photo available for this scan.
+            </div>
           )}
         </div>
+
+        {/* --- Right: everything else, ~75% --- */}
+        <div className="lg:w-3/4 min-w-0">
+      <div className="flex items-center justify-end mb-3">
         <StatusBadge status={r.overall_status} />
       </div>
 
@@ -232,17 +257,17 @@ export default function ItemDetailModal({
       </div>
 
       {rows.length > 0 && !resolved && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-lg p-3 mb-3" style={{ background: "var(--color-red-tint)" }}>
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-lg p-3 mb-3" style={{ background: bannerTint }}>
           <div className="flex items-center justify-between mb-2">
-            <div className="text-sm font-semibold" style={{ color: "var(--color-red)" }}>
-              Discrepancies Found - Human Intervention Required
+            <div className="text-sm font-semibold" style={{ color: bannerColor }}>
+              {isCritical ? "Discrepancies Found - Human Intervention Required" : "Discrepancies Found - Review Recommended"}
             </div>
             <button
               onClick={() => (editing ? setEditing(false) : startEditing())}
               className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-md"
               style={editing
-                ? { background: "var(--color-red)", color: "white" }
-                : { border: "1px solid var(--color-red)", color: "var(--color-red)" }}
+                ? { background: bannerColor, color: "white" }
+                : { border: `1px solid ${bannerColor}`, color: bannerColor }}
             >
               {editing ? <X size={11} strokeWidth={2.5} /> : <Pencil size={11} strokeWidth={2.5} />}
               {editing ? "Cancel edit" : "Edit values"}
@@ -251,7 +276,7 @@ export default function ItemDetailModal({
           <div className="overflow-x-auto">
             <table className="w-full text-xs mb-3">
               <thead>
-                <tr className="text-left" style={{ color: "var(--color-red)" }}>
+                <tr className="text-left" style={{ color: bannerColor }}>
                   <th className="pb-1 pr-3 font-medium">Field</th>
                   <th className="pb-1 pr-3 font-medium">Expected</th>
                   <th className="pb-1 pr-3 font-medium">Detected</th>
@@ -259,7 +284,7 @@ export default function ItemDetailModal({
                   <th className="pb-1 font-medium">Recommended Action</th>
                 </tr>
               </thead>
-              <tbody style={{ color: "var(--color-red)" }}>
+              <tbody style={{ color: bannerColor }}>
                 {rows.map((row, i) => (
                   <tr key={i} className="align-top">
                     <td className="py-1 pr-3 font-medium whitespace-nowrap">{row.field}</td>
@@ -278,7 +303,7 @@ export default function ItemDetailModal({
               <motion.div key="edit" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <div
                   className="grid sm:grid-cols-4 gap-2 mb-2 rounded-md p-2.5"
-                  style={{ background: "white", border: "1px solid var(--color-red)" }}
+                  style={{ background: "white", border: `1px solid ${bannerColor}` }}
                 >
                   <EditField label="GTIN" value={editGtin} onChange={setEditGtin} />
                   <EditField label="Batch" value={editBatch} onChange={setEditBatch} />
@@ -290,9 +315,9 @@ export default function ItemDetailModal({
                   onChange={(e) => setReason(e.target.value)}
                   placeholder="e.g. Corrected batch from a misread barcode - verified against the physical label."
                   className="w-full rounded-md px-2.5 py-1.5 text-sm mb-2 border"
-                  style={{ borderColor: "var(--color-red)", background: "white" }}
+                  style={{ borderColor: bannerColor, background: "white" }}
                 />
-                {updateError && <p className="text-xs mb-2" style={{ color: "var(--color-red)" }}>{updateError}</p>}
+                {updateError && <p className="text-xs mb-2" style={{ color: bannerColor }}>{updateError}</p>}
                 <div className="flex gap-2">
                   <button
                     onClick={submitUpdate}
@@ -305,7 +330,7 @@ export default function ItemDetailModal({
                   <button
                     onClick={() => setEditing(false)}
                     className="text-xs font-semibold px-3 py-1.5 rounded-lg"
-                    style={{ border: "1px solid var(--color-red)", color: "var(--color-red)" }}
+                    style={{ border: `1px solid ${bannerColor}`, color: bannerColor }}
                   >
                     Cancel
                   </button>
@@ -313,7 +338,7 @@ export default function ItemDetailModal({
               </motion.div>
             ) : (
               <motion.div key="resolve" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <label className="block text-xs font-medium mb-1" style={{ color: "var(--color-red)" }}>
+                <label className="block text-xs font-medium mb-1" style={{ color: bannerColor }}>
                   Justification
                 </label>
                 <input
@@ -321,13 +346,13 @@ export default function ItemDetailModal({
                   onChange={(e) => setReason(e.target.value)}
                   placeholder="e.g. Confirmed 10 physical units on the shelf; short delivery accepted."
                   className="w-full rounded-md px-2.5 py-1.5 text-sm mb-2 border"
-                  style={{ borderColor: "var(--color-red)", background: "white" }}
+                  style={{ borderColor: bannerColor, background: "white" }}
                 />
                 <div className="flex gap-2">
                   <button onClick={() => onResolve("accepted", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white" style={{ background: "var(--color-green)" }}>
                     Accept
                   </button>
-                  <button onClick={() => onResolve("rejected", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ border: "1px solid var(--color-red)", color: "var(--color-red)" }}>
+                  <button onClick={() => onResolve("rejected", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ border: `1px solid ${bannerColor}`, color: bannerColor }}>
                     Reject
                   </button>
                 </div>
@@ -364,6 +389,7 @@ export default function ItemDetailModal({
                     ? "Tatmeen Validation Failed"
                     : "Not Reported on Tatmeen"
                 )}
+                {r.tatmeen_status === "n_a" && "Tatmeen Not Checked"}
               </span>
             </div>
             <p className="text-xs text-[var(--color-muted)] mt-1">
@@ -378,6 +404,8 @@ export default function ItemDetailModal({
           </p>
         )}
       </AnimatePresence>
+        </div>
+      </div>
     </Modal>
   );
 }

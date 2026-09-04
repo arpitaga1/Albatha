@@ -74,6 +74,17 @@ def search_sap_invoice(invoice_number: str, db: Session = Depends(get_db)):
     return _sap_row(db, inv)
 
 
+@router.get("/preloaded")
+def list_preloaded_invoices(db: Session = Depends(get_db)):
+    """
+    "Pre-uploaded Invoices" dropdown on the Start New Validation screen —
+    real client-provided invoice fixtures (app.services.sap_source.
+    get_preloaded_invoices), kept separate from the "Invoices from SAP"
+    list above even though the row shape is identical.
+    """
+    return [_sap_row(db, inv) for inv in sap_source.get_preloaded_invoices(db)]
+
+
 @router.post("/upload", response_model=InvoiceOut)
 async def upload_invoice(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """

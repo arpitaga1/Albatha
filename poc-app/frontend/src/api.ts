@@ -27,6 +27,7 @@ async function j<T>(res: Response): Promise<T> {
 export const api = {
   listInvoices: () => fetch(`${BASE}/invoices`).then((r) => j<InvoiceSummary[]>(r)),
   listSapInvoices: () => fetch(`${BASE}/invoices/sap`).then((r) => j<SapInvoiceRow[]>(r)),
+  listPreloadedInvoices: () => fetch(`${BASE}/invoices/preloaded`).then((r) => j<SapInvoiceRow[]>(r)),
   searchSapInvoice: (invoiceNumber: string) =>
     fetch(`${BASE}/invoices/sap/search/${encodeURIComponent(invoiceNumber)}`).then((r) => j<SapInvoiceRow>(r)),
   getInvoice: (invoiceNumber: string) =>
@@ -44,6 +45,8 @@ export const api = {
     }).then((r) => j<ValidationResult>(r)),
   ssccNegativeControl: () =>
     fetch(`${BASE}/demo/sscc-negative-control`).then((r) => j<unknown>(r)),
+  reseedDatabase: () =>
+    fetch(`${BASE}/demo/reseed`, { method: "POST" }).then((r) => j<{ status: string; invoices: number }>(r)),
 
   // --- Real (no mock, no API key) extraction ---
   uploadInvoice: (file: File) => {

@@ -5,12 +5,40 @@ calling the actual validation_engine.rule_case_containment implementation
 that ships in this app, not the standalone R&D script. Proves rule 5 still
 catches the same two injected faults inside the real application code.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
+from app.models import Invoice, InvoiceLineItem, ScanEvent, SSCCRecord, TatmeenRecord, ValidationResult
 from app.services.extraction import ExtractionResult
+from app.services.seed_data import seed_all
 from app.services.validation_engine import LineItemValidation, rule_case_containment
 
 router = APIRouter(prefix="/api/demo", tags=["demo"])
+
+
+@router.post("/reseed")
+def reseed(db: Session = Depends(get_db)):
+    """Wipes every table this app writes to and re-runs seed_all(), so the
+    system comes back looking exactly like a fresh install - the 7 demo
+    invoices + Tatmeen/SSCC dummy data restored, and every scan/validation
+    result from prior runs gone. Deleted in FK-dependency order (results and
+    scan events before the line items/invoices they point to); Tatmeen and
+    SSCC dummy records have no FK to invoices, so order doesn't matter for
+    those two. seed_all() is otherwise a no-op once any invoice exists, which
+    is exactly why this needs to delete first rather than just calling it
+    again."""
+    db.query(ValidationResult).delete()
+    db.query(ScanEvent).delete()
+    db.query(InvoiceLineItem).delete()
+    db.query(Invoice).delete()
+    db.query(TatmeenRecord).delete()
+    db.query(SSCCRecord).delete()
+    db.commit()
+
+    seed_all(db)
+
+    return {"status": "reseeded", "invoices": db.query(Invoice).count()}
 
 REAL_ITEM1_SERIALS = [
     "1037937537575", "1068077918463", "1072254253703", "1055969362709",

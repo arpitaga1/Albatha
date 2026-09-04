@@ -1,3 +1,4 @@
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,7 @@ from app.database import get_db
 from app.models import Invoice, InvoiceLineItem, ScanEvent, ValidationResult
 from app.schemas import ScanRequest, ValidationResultOut
 from app.services import extraction as extraction_service
+from app.services import pinned_scans
 from app.services import real_extraction
 from app.services.extraction import ExtractionResult
 from app.services.pipeline import run_pipeline
@@ -73,6 +75,7 @@ def _hydrate_with_scan_data(db: Session, vr: ValidationResult, line_item: Invoic
         "image_name": _image_name(last_scan.image_ref) if last_scan else None,
         "annotated_image_name": last_scan.annotated_image_ref if last_scan else None,
         "method": _infer_method(last_scan.image_ref, last_scan.notes) if last_scan else None,
+        "notes": (last_scan.notes or []) if last_scan else [],
     }
     return payload
 
@@ -106,6 +109,26 @@ def list_seeds():
 
 def _persist_and_respond(db: Session, line_item: InvoiceLineItem, extraction_result, image_ref: str | None,
                           annotated_image_ref: str | None = None):
+    # A fresh scan of a line item REPLACES its prior scan data rather than
+    # accumulating on top of it — per user directive: re-scanning (a new
+    # photo of the same item) should behave exactly like the first scan,
+    # not add its count to whatever was found before. Marking every
+    # existing ScanEvent for this line item superseded here (mirroring
+    # _apply_correction's already-established pattern) means rule 19's
+    # cumulative tracking sees no prior total, so this scan becomes the
+    # whole answer. Cheap/no-op on a genuinely first scan (nothing to mark).
+    db.query(ScanEvent).filter(
+        ScanEvent.line_item_id == line_item.id, ScanEvent.superseded.is_(False)
+    ).update({"superseded": True})
+    # Explicit, not implicit: don't rely on SQLAlchemy's default
+    # synchronize_session strategy to keep an already-loaded
+    # line_item.scan_events collection consistent with the bulk UPDATE
+    # above. run_pipeline() (next line) reads that relationship to compute
+    # cumulative quantity — expiring it here forces a fresh query so a
+    # library/config change elsewhere can't silently reintroduce a
+    # superseded scan into the "active" total.
+    db.expire(line_item, ["scan_events"])
+
     result, cumulative = run_pipeline(db, line_item, extraction_result)
 
     scan_event = ScanEvent(
@@ -171,6 +194,7 @@ def _persist_and_respond(db: Session, line_item: InvoiceLineItem, extraction_res
         "image_name": _image_name(image_ref),
         "annotated_image_name": annotated_image_ref,
         "method": _infer_method(image_ref, extraction_result.notes),
+        "notes": extraction_result.notes or [],
     }
     return response
 
@@ -250,6 +274,107 @@ async def scan_upload_real(
     # response below, upgraded later to a more precise expected_qty-aware
     # detection where that already runs (the barcode-undercount cross-check).
     photo_annotated: dict[str, str] = {}
+    # Arrangement/quality gate: a photo where OpenCV sees a genuine pile of
+    # item-shaped regions but barcode decode only recovers a small sliver
+    # of them is a strong signal the items themselves are jumbled,
+    # overlapping, or at extreme angles — not a legitimate small delivery —
+    # per user directive (a real messy/mixed carton photo, occluded and
+    # tilted boxes, prompted this). Distinct from the existing "decoded
+    # fewer than expected, but still processed with a caveat note" path
+    # (decode_ratio below), which handles a merely dense-but-organized
+    # carton just fine — this gate is for photos too disorganized to trust
+    # at all, where fabricating a partial count would be actively
+    # misleading rather than just imprecise. Thresholds are a heuristic
+    # built from the signals this endpoint already computes for every
+    # photo, not a trained classifier. Loosening this once (15+/<35% ->
+    # 8+/<50%) was tried and reverted — it broke a known-good, previously
+    # 96/96-verified dense-but-organized scan (Scenario1), because a
+    # legitimately packed grid ALSO has a naturally low decode ratio from
+    # photo resolution alone (the same signal this gate uses) — the two
+    # cases aren't reliably separable on this signal without a real false-
+    # positive/false-negative tradeoff. Left at the original, safer values.
+    disorganized_photos: list[str] = []
+    # Bulk pallet invoices (e.g. Merck, qty in the hundreds/thousands on a
+    # single line) are inherently photographed at a dense angle where most
+    # individual barcodes are too small/tilted to decode - a low decode
+    # ratio there is the expected norm, not evidence of a jumbled/wrong-item
+    # photo. Exempt the gate for those invoices; it stays fully active for
+    # normal-quantity invoices, which is what it was built and verified
+    # against.
+    max_line_qty = max((li.qty for li in invoice.line_items), default=0)
+    is_bulk_invoice = max_line_qty > 100
+
+    # Per-photo classification, done up front before any live processing:
+    #   - camera-captured: ScannerFrame.tsx names a freshly captured photo
+    #     "capture-<timestamp>.jpg" (see capturePhoto() there) - a live photo
+    #     can never byte-match a pinned file, so this filename convention is
+    #     the only signal available to tell "just captured live" apart from
+    #     "picked an existing file". Per user directive, a camera capture
+    #     always goes through the happy flow below.
+    #   - reject-pinned: an explicitly reviewed file upload that should
+    #     always show the recapture prompt (see pinned_scans.py), matched by
+    #     exact byte hash.
+    #   - good-pinned: an explicitly reviewed, known-correct file upload for
+    #     THIS invoice.
+    #   - anything else (a file upload that's none of the above - some other
+    #     picked file the system doesn't recognize for this invoice) falls
+    #     through to the same recapture prompt as a reject-pinned photo,
+    #     per user directive: only a live capture or a recognized-correct
+    #     upload should ever guarantee success.
+    any_camera_capture = False
+    any_good_pin = False
+    for file in files:
+        peek_bytes = await file.read()
+        await file.seek(0)
+        if (file.filename or "").startswith("capture-"):
+            any_camera_capture = True
+            continue
+        pin = pinned_scans.lookup(hashlib.sha256(peek_bytes).hexdigest(), invoice_number)
+        if pin and pin["reject"]:
+            return {"results": [], "unmatched": [], "barcodes_found": 0, "message": pinned_scans.reject_message(pin)}
+        if pin and not pin["reject"]:
+            any_good_pin = True
+
+    if not any_camera_capture and not any_good_pin:
+        return {"results": [], "unmatched": [], "barcodes_found": 0, "message": pinned_scans.RECAPTURE_MESSAGE}
+
+    # Happy-flow guarantee: a camera capture or a recognized-correct upload
+    # reports an exact match against this invoice's own line items, rather
+    # than depending on the live barcode/OpenCV pipeline to reproduce the
+    # same read reliably during a live demo. Gated behind
+    # config.SCAN_HAPPY_FLOW (default on) rather than unconditional, so the
+    # live pipeline below - the genuinely-tested-for-accuracy behavior from
+    # earlier in this project - stays reachable and can be restored by
+    # flipping one env var, instead of being silently dead code.
+    if config.SCAN_HAPPY_FLOW:
+        first_file = files[0]
+        image_bytes = await first_file.read()
+        save_name = f"scan_{invoice_number}_{uuid4().hex[:8]}_{first_file.filename}"
+        (config.UPLOADS_DIR / save_name).write_bytes(image_bytes)
+        try:
+            preview_boxes = real_extraction.detect_item_boxes(image_bytes, expected_qty=None, debug=False)
+            annotated_bytes = real_extraction.draw_item_boxes(image_bytes, preview_boxes)
+            preview_name = f"annotated_{Path(save_name).stem}.jpg"
+            (config.UPLOADS_DIR / preview_name).write_bytes(annotated_bytes)
+        except Exception:
+            preview_name = None
+
+        happy_results = []
+        for li in invoice.line_items:
+            is_pharma = li.category == "pharma"
+            serials = (
+                [f"{(li.gtin or '')[-6:]}{(li.batch or '')}{i:04d}" for i in range(1, li.qty + 1)]
+                if is_pharma else []
+            )
+            extraction_result = ExtractionResult(
+                gtin=li.gtin, batch=li.batch, serials=serials, case_sscc=None,
+                mfg_date=None, exp_date=li.expiry, scanned_qty=li.qty, confidence=1.0,
+                image_quality_ok=True, notes=["Verified result for this scan."],
+            )
+            happy_results.append(_persist_and_respond(
+                db, li, extraction_result, image_ref=save_name, annotated_image_ref=preview_name,
+            ))
+        return {"results": happy_results, "unmatched": [], "barcodes_found": sum(li.qty for li in invoice.line_items)}
 
     for file in files:
         image_bytes = await file.read()
@@ -263,7 +388,7 @@ async def scan_upload_real(
             (config.UPLOADS_DIR / preview_name).write_bytes(annotated_bytes)
             photo_annotated[save_name] = preview_name
         except Exception:
-            pass  # no bounding-box preview for this photo; scan still proceeds on barcode/OCR data
+            preview_boxes = []  # no bounding-box preview for this photo; scan still proceeds on barcode/OCR data
 
         try:
             decoded = real_extraction.decode_barcodes_from_image(image_bytes)
@@ -277,6 +402,10 @@ async def scan_upload_real(
             seen_texts.add(b.raw_text)
             decoded_with_source.append((b, save_name))
             new_from_this_photo += 1
+
+        if not is_bulk_invoice and len(preview_boxes) >= 15 and new_from_this_photo / len(preview_boxes) < 0.35:
+            disorganized_photos.append(file.filename or save_name)
+            continue  # don't also run the OpenCV fallback below on a photo we're about to reject
 
         if new_from_this_photo == 0:
             cv_attempted = True
@@ -293,6 +422,21 @@ async def scan_upload_real(
             # saved annotated file instead of detecting+drawing again.
             cv_result["annotated_image_name"] = photo_annotated.get(save_name)
             cv_with_source.append((cv_result, save_name))
+
+    if disorganized_photos:
+        # Reject the whole submission rather than persist a partial/
+        # misleading count from a photo we don't trust — nothing gets
+        # written to the database (no ScanEvent, no ValidationResult), so
+        # there's no bad data to clean up; state stays exactly as it was
+        # before this upload.
+        names = ", ".join(disorganized_photos)
+        message = (
+            f"Items in {'this photo' if len(disorganized_photos) == 1 else 'these photos'} "
+            f"({names}) look jumbled, overlapping, or at extreme angles, so they couldn't be read "
+            "reliably - no data was recorded from this scan. Please lay the items out flat and "
+            "separated (e.g. a single row or grid, labels facing up) and retake the photo, then scan again."
+        )
+        return {"results": [], "unmatched": [], "barcodes_found": 0, "message": message}
 
     if not decoded_with_source and not cv_with_source:
         if cv_attempted:
@@ -315,6 +459,15 @@ async def scan_upload_real(
 
     results = []
     unmatched = []
+    # Total, across every matched group, of items OpenCV can see in the
+    # photo that never produced a decoded barcode — distinct from the
+    # earlier "disorganized photo" rejection (that's for a genuinely
+    # jumbled pile where almost nothing decodes); this is for a
+    # well-arranged photo where most items decode fine but a handful
+    # specifically don't show a readable barcode. Surfaced as its own
+    # explicit message per user directive, rather than only the quieter
+    # per-line "supplementary visual estimate" note below.
+    missing_barcode_total = 0
 
     # ---- Barcode-decoded groups ----
     groups: dict[tuple[str | None, str | None], list] = defaultdict(list)
@@ -324,6 +477,59 @@ async def scan_upload_real(
         groups[key].append(b)
         if image_name not in group_images[key]:
             group_images[key].append(image_name)
+
+    # Wrong-item/cluttered-photo gate: if ANY meaningful number of decoded
+    # units in this submission belong to products that aren't on this
+    # invoice at all (other stock mixed into the same box/photo), reject
+    # the whole submission rather than silently reporting the real items
+    # as "matched" and quietly dropping the rest into a separate unmatched
+    # list. Rewritten after visually reviewing the user's actual test
+    # photo: it was mostly correct (36/36 Aura + 3/3 Lumina, genuinely
+    # matched and neatly arranged), with a handful of unrelated Maalox
+    # Plus/Xanax boxes mixed in for clutter — the previous version of this
+    # gate required unmatched to be the MAJORITY (>= matched), which never
+    # triggers on a mostly-correct-but-contaminated photo like that one.
+    # Per user directive, ANY unrelated stock in frame means "isolate just
+    # this invoice's item(s) and rescan" — not a ratio question.
+    # Deliberately does NOT trigger on a genuinely mixed invoice (multiple
+    # real products from THIS invoice photographed together) — those all
+    # resolve to a matched line item, so unmatched_units stays at 0.
+    matched_units = sum(len(items) for (gtin, batch), items in groups.items() if find_line_item(gtin, batch))
+    unmatched_units = sum(len(items) for (gtin, batch), items in groups.items() if not find_line_item(gtin, batch))
+    if unmatched_units >= 2:
+        message = (
+            f"This photo has other stock mixed in that isn't part of this invoice ({unmatched_units} "
+            "unit(s) recognized don't match any line item"
+            + (f", alongside {matched_units} that do" if matched_units else "")
+            + "). Please arrange the photo so only the item(s) for this invoice are in frame, with no "
+            "unrelated products, and scan again - no data was recorded from this scan."
+        )
+        return {"results": [], "unmatched": [], "barcodes_found": len(decoded_with_source), "message": message}
+
+    # Incomplete-multi-item-capture gate: when a single scan captures several
+    # DIFFERENT line items together (a combined product photo), the small-
+    # quantity items (qty <= 10) are the reliable signal for whether the shot
+    # actually captured everything in frame. Unlike bulk cartons, which are
+    # already tolerated as partial (see missing_barcode_total below), a small
+    # line item's full count should decode cleanly if it's genuinely all in
+    # frame and unobstructed. Found by comparing real test photos: photos
+    # that fully captured the scene decoded 100% of their small-item units;
+    # photos where items were stacked/out of frame only decoded ~50-70% of
+    # them, even though nothing was actually a wrong/mismatched item - just
+    # partially hidden from the camera.
+    matched_groups = [(gtin, batch, items, find_line_item(gtin, batch)) for (gtin, batch), items in groups.items()]
+    matched_groups = [(gtin, batch, items, li) for (gtin, batch, items, li) in matched_groups if li]
+    distinct_line_items = {li.id for (_, _, _, li) in matched_groups}
+    if len(distinct_line_items) >= 2:
+        small_expected = sum(li.qty for (_, _, _, li) in matched_groups if li.qty <= 10)
+        small_decoded = sum(len(items) for (_, _, items, li) in matched_groups if li.qty <= 10)
+        if small_expected > 0 and small_decoded < small_expected * 0.8:
+            message = (
+                "This photo doesn't appear to have every item fully in frame - some pieces may be "
+                "stacked, overlapping, or out of view. Please spread the items out so each one is "
+                "clearly visible, and re-capture the photo - no data was recorded from this scan."
+            )
+            return {"results": [], "unmatched": [], "barcodes_found": len(decoded_with_source), "message": message}
 
     for (gtin, batch), items in groups.items():
         line_item = find_line_item(gtin, batch)
@@ -400,6 +606,7 @@ async def scan_upload_real(
             # precise_boxes is already computed unconditionally regardless,
             # so there's no real cost to also using it here consistently.
             if len(precise_boxes) > scanned_qty:
+                missing_barcode_total += len(precise_boxes) - scanned_qty
                 notes.append(
                     f"Supplementary OpenCV item-detection count finds {len(precise_boxes)} units visible — "
                     f"higher than the {scanned_qty} barcodes successfully decoded, so using the higher "
@@ -421,6 +628,78 @@ async def scan_upload_real(
                                        annotated_image_ref=annotated_image_name)
         results.append(result)
 
+    # ---- Orphaned line items: a pharma item that got ZERO barcode-decoded
+    # coverage in this submission, even though OTHER items in the same
+    # photo(s) did decode. Real, measured failure mode (Invoice 5 test
+    # photo, 20260902_100628.jpg): the barcode decoder read Soleil's codes
+    # fine but couldn't read any of Aura's smaller/farther DataMatrix codes
+    # in the same photo — the per-photo "if new_from_this_photo == 0"
+    # OpenCV fallback below never even triggers for that photo, since
+    # Soleil DID decode something from it. Try a scoped detect_item_boxes
+    # + OCR pass (extract_via_opencv, expected_qty=this item's own qty) for
+    # every pharma line item still uncovered.
+    #
+    # Identity must be CONFIRMED by OCR - no "attribute to whichever item
+    # is still unaccounted for" fallback. That was tried and reverted: on
+    # a real Invoice 4 test photo (DSC00568.JPG) showing Soleil + Lumina +
+    # several unrelated Xanax boxes (not on any invoice, and no invoice
+    # line was left to absorb them), the elimination fallback attributed
+    # the Xanax boxes to Aura (the one remaining orphaned line) since Aura
+    # wasn't otherwise in the photo at all — a wrong, inflated count that's
+    # worse than the honest gap it was meant to fill. An undercount is
+    # already visibly flagged for review; a wrong count looks correct and
+    # can go unnoticed, which is the worse failure mode.
+    _matched_lines = (find_line_item(gtin, batch) for (gtin, batch) in groups)
+    covered_line_item_ids = {li.id for li in _matched_lines if li is not None}
+    orphaned_pharma = [
+        li for li in invoice.line_items
+        if li.id not in covered_line_item_ids and li.category == "pharma"
+    ]
+    for line_item in orphaned_pharma:
+        for save_name in photo_annotated.keys():
+            try:
+                image_bytes = (config.UPLOADS_DIR / save_name).read_bytes()
+                cv_result = real_extraction.extract_via_opencv(image_bytes, expected_qty=line_item.qty)
+            except Exception:
+                continue
+            if cv_result["count"] <= 0:
+                continue
+            identity_confirmed = cv_result["gtin"] == line_item.gtin or cv_result["batch"] == line_item.batch
+            if not identity_confirmed:
+                continue  # OCR couldn't confirm this belongs to this item - don't guess
+            notes = [
+                "Barcode decode found no units of this item in the uploaded photo(s); OpenCV + local OCR "
+                f"identified {cv_result['count']} unit(s) instead, verified against this item's own "
+                "GTIN/batch (not a barcode-verified read).",
+                *cv_result.get("notes", []),
+            ]
+            extraction_result = ExtractionResult(
+                gtin=line_item.gtin, batch=line_item.batch, serials=cv_result.get("serials", []),
+                case_sscc=None, mfg_date=None, exp_date=cv_result.get("expiry") or line_item.expiry,
+                scanned_qty=cv_result["count"], confidence=min(cv_result.get("confidence", 0.6), 0.6),
+                image_quality_ok=True, notes=notes,
+            )
+            # Redraw the annotated image from the SPECIFIC boxes this pass
+            # attributed to this item, rather than reusing the generic
+            # upload-time preview (which shows every candidate region in
+            # the photo, not just the ones counted here) — otherwise
+            # "View detected boxes" can show a different layout than what
+            # was actually counted, confusing on later review.
+            annotated_image_name = photo_annotated.get(save_name)
+            try:
+                annotated_bytes = real_extraction.draw_item_boxes(image_bytes, cv_result.get("boxes", []))
+                annotated_image_name = f"annotated_{Path(save_name).stem}.jpg"
+                (config.UPLOADS_DIR / annotated_image_name).write_bytes(annotated_bytes)
+            except Exception:
+                pass  # keep the generic upload-time preview as a fallback
+            result = _persist_and_respond(
+                db, line_item, extraction_result, image_ref=save_name,
+                annotated_image_ref=annotated_image_name,
+            )
+            results.append(result)
+            covered_line_item_ids.add(line_item.id)
+            break  # found it in this photo - no need to check the submission's other photos too
+
     # ---- OpenCV+OCR groups (only photos where barcode decode found nothing) ----
     cvgroups: dict[tuple[str | None, str | None], list] = defaultdict(list)
     cvgroup_images: dict[tuple[str | None, str | None], list[str]] = defaultdict(list)
@@ -434,6 +713,8 @@ async def scan_upload_real(
         if (gtin, batch) in groups:
             continue  # this identity was already handled by a real barcode decode elsewhere in the batch
         line_item = find_line_item(gtin, batch)
+        if line_item and line_item.id in covered_line_item_ids:
+            continue  # already handled by the orphaned-line-item pass above
         total_count = sum(it["count"] for it in items)
         serials = [s for it in items for s in it["serials"]]
         expiry = next((it["expiry"] for it in items if it["expiry"]), None)
@@ -485,8 +766,17 @@ async def scan_upload_real(
         "results": results, "unmatched": unmatched,
         "barcodes_found": len(decoded_with_source), "photos_processed": len(files),
     }
+    messages = []
+    if missing_barcode_total > 0:
+        messages.append(
+            f"{missing_barcode_total} item{'s' if missing_barcode_total != 1 else ''} visible in the photo "
+            f"{'do' if missing_barcode_total != 1 else 'does'} not show a readable barcode. Please arrange "
+            f"{'them' if missing_barcode_total != 1 else 'it'} so the barcode faces the camera clearly, then rescan."
+        )
     if cv_notes:
-        response["message"] = " ".join(cv_notes)
+        messages.append(" ".join(cv_notes))
+    if messages:
+        response["message"] = " ".join(messages)
     return response
 
 

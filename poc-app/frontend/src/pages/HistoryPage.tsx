@@ -70,7 +70,7 @@ export default function HistoryPage() {
           style={{ background: "var(--color-accent)" }}
         >
           <Plus size={15} strokeWidth={2.5} />
-          Start Validation
+          Upload Invoice
         </Link>
       </div>
 

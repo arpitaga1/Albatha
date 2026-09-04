@@ -171,7 +171,22 @@ def decode_barcodes_from_image(image_bytes: bytes) -> list[DecodedBarcode]:
             y0 = max(0, int(row * tile_h - tile_h * overlap))
             y1 = min(h, int((row + 1) * tile_h + tile_h * overlap))
             tile = img.crop((x0, y0, x1, y1))
-            tile = tile.resize((tile.width * 4, tile.height * 4), Image.LANCZOS)
+            # Real, measured bottleneck: a fixed 4x upscale was tuned
+            # against smaller source photos. On this app's actual real
+            # photos (15-20MP phone/camera shots), each of the 9 tiles is
+            # already ~1600-2000px on its own, so a flat 4x turns it into
+            # a ~30MP+ image scanned up to 3x (default + 2 fallback
+            # binarizers) — measured at 35+ seconds for one photo,
+            # dominating the whole scan pipeline. Cap the UPSCALED size
+            # instead of the multiplier: small/low-res tiles still get up
+            # to the full 4x boost (preserving the tested "catches codes
+            # too small in the full frame" benefit), but a tile that's
+            # already large gets little or no upscale, since it doesn't
+            # need it and doesn't get to blow up further.
+            _MAX_TILE_DIM = 2400
+            tile_scale = max(1.0, min(4.0, _MAX_TILE_DIM / max(tile.width, tile.height)))
+            if tile_scale > 1.0:
+                tile = tile.resize((int(tile.width * tile_scale), int(tile.height * tile_scale)), Image.LANCZOS)
             for r in _decode_pil_image(tile):
                 if r.text not in seen_texts:
                     seen_texts.add(r.text)
@@ -707,6 +722,30 @@ def _split_merged_contour(img_shape: tuple[int, int], contour: np.ndarray) -> li
     return split_boxes if len(split_boxes) >= 2 else _bisect()
 
 
+def _largest_uniform_cluster(contours: list[np.ndarray]) -> list[np.ndarray]:
+    """
+    Groups contours into runs of similar area (sorted by area, split
+    wherever a neighbor's area jumps by more than 60%) and returns the
+    largest run. Real boxes of one product are uniform in size (the same
+    ~15% variance assumption used elsewhere in this module) — a same-sized
+    cluster is a strong proxy for "these are one product's real individual
+    units", filtering out a differently-sized product (or noise) that also
+    happened to pass a broad area-range filter.
+    """
+    if not contours:
+        return []
+    scored = sorted(contours, key=cv2.contourArea)
+    clusters: list[list[np.ndarray]] = [[scored[0]]]
+    for c in scored[1:]:
+        prev_area = cv2.contourArea(clusters[-1][-1])
+        area = cv2.contourArea(c)
+        if prev_area > 0 and area / prev_area <= 1.6:
+            clusters[-1].append(c)
+        else:
+            clusters.append([c])
+    return max(clusters, key=len)
+
+
 def detect_item_boxes(
     image_bytes: bytes, expected_qty: int | None = None,
     min_aspect: float = 1.0, max_aspect: float = 5.0,
@@ -737,6 +776,33 @@ def detect_item_boxes(
     img_cv = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img_cv is None:
         return []
+
+    # Real phone/camera photos in this app run 15-20MP - contour-detection
+    # cost scales with pixel count, and this function already sweeps up to
+    # 16 kernel sizes across two passes (see the qty-scoped-filter fallback
+    # below), so full resolution here was measured to be the dominant cost
+    # in the whole scan pipeline (a 3-photo submission took 120+ seconds
+    # before this change). Box SHAPES are still clearly resolvable well
+    # below full resolution, so detection runs on a capped-size copy; every
+    # box this function returns is rescaled back to ORIGINAL image
+    # coordinates before returning, so callers (OCR crops, annotated-image
+    # drawing) are unaffected and still work against full-resolution pixels.
+    orig_h, orig_w = img_cv.shape[:2]
+    detect_scale = 1.0
+    _MAX_DETECT_DIM = 1600
+    if max(orig_h, orig_w) > _MAX_DETECT_DIM:
+        detect_scale = _MAX_DETECT_DIM / max(orig_h, orig_w)
+        img_cv = cv2.resize(
+            img_cv, (max(1, int(orig_w * detect_scale)), max(1, int(orig_h * detect_scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    def _to_original_scale(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+        if detect_scale == 1.0:
+            return boxes
+        inv = 1.0 / detect_scale
+        return [(int(x * inv), int(y * inv), int(bw * inv), int(bh * inv)) for (x, y, bw, bh) in boxes]
+
     h, w = img_cv.shape[:2]
     img_area = h * w
 
@@ -760,6 +826,32 @@ def detect_item_boxes(
             best_kernel = kernel_size
 
     total_before_split = len(best_contours)
+
+    # Real, measured failure mode (Invoice 5 test photo, 20260902_100628.jpg):
+    # the qty-scoped area filter assumes each item occupies roughly
+    # 1/expected_qty of the WHOLE image — wrong whenever a lot of other
+    # content shares the frame (a second, larger product; background/
+    # carton), so the real items are much smaller than that fraction and
+    # get filtered out, leaving too few contours to trust (here: 3, when
+    # 12 boxes were actually visible and correctly found by the broader
+    # generic sweep below). When that happens, re-run with the same broad
+    # area range used when expected_qty is unknown, then keep only the
+    # LARGEST same-sized cluster of contours (real boxes of one product
+    # are uniform in size — this filters out an unrelated differently-
+    # sized product that also happened to pass the broad filter).
+    if expected_qty and expected_qty > 0 and total_before_split < max(3, int(expected_qty * 0.5)):
+        generic_best: list[np.ndarray] = []
+        for kernel_size in (3, 5, 7, 9, 11, 13, 15, 17):
+            contours = _detect_contours_for_kernel(edges, img_area, kernel_size, 0.003, 0.20, min_aspect, max_aspect)
+            if len(contours) > len(generic_best) and len(contours) <= 200:
+                generic_best = contours
+        cluster = _largest_uniform_cluster(generic_best)
+        if len(cluster) > total_before_split:
+            if debug:
+                print(f"[detect_item_boxes] qty-scoped filter only found {total_before_split} - "
+                      f"falling back to generic sweep's largest uniform cluster ({len(cluster)} boxes)")
+            best_contours = cluster
+            total_before_split = len(best_contours)
 
     # Flag likely merged/touching pairs by area vs. the group's own median
     # (boxes are roughly uniform size, so ~2x median is a strong "this is
@@ -794,12 +886,24 @@ def detect_item_boxes(
     # (confirmed: box width/height vary only ~15% across a whole photo),
     # extrapolate the full grid from whatever WAS reliably detected instead
     # of requiring every individual box to segment on its own.
-    if expected_qty and expected_qty > 0 and len(final_boxes) < expected_qty:
+    # Only trust a full-grid extrapolation when the sample is a substantial
+    # fraction of expected_qty (>=25%) — a real, measured failure mode: a
+    # thin sample (e.g. 4 boxes standing in for an expected 24) gives
+    # _fit_full_grid too little to size a cell from, and a wrong cell size
+    # tiled across the whole extrapolated extent can wildly overshoot (4
+    # real boxes -> a fabricated 24). Below that fraction, returning the
+    # smaller-but-real sample is safer than a confident-looking, wrong
+    # count — consistent with this app's own principle of flagging low
+    # confidence rather than fabricating a number.
+    if (
+        expected_qty and expected_qty > 0 and len(final_boxes) < expected_qty
+        and len(final_boxes) >= expected_qty * 0.25
+    ):
         grid_boxes = _fit_full_grid(final_boxes, expected_qty, edges, img_cv.shape, debug=debug)
         if grid_boxes:
-            return grid_boxes
+            return _to_original_scale(grid_boxes)
 
-    return final_boxes
+    return _to_original_scale(final_boxes)
 
 
 def _estimate_content_extent(edges: np.ndarray) -> tuple[int, int, int, int] | None:
@@ -896,7 +1000,19 @@ def _fit_full_grid(
             ex <= sample_x0 + 5 and ey <= sample_y0 + 5
             and ex + ew >= sample_x1 - 5 and ey + eh >= sample_y1 - 5
         )
-        if ew <= 0 or eh <= 0 or not contains_sample:
+        # Real, measured failure mode (same Invoice 5 photo as the cluster
+        # fallback above): when other content shares the frame (a second
+        # product, background), the aggressive dilate/close in
+        # _estimate_content_extent merges everything into one blob
+        # spanning nearly the whole image — it still trivially CONTAINS
+        # the real sample, so the check above alone doesn't catch it. A
+        # sane extent for `expected_qty` boxes of this sample's own size
+        # shouldn't be wildly bigger than expected_qty copies of that box
+        # (packed items don't have huge gaps) — reject it as implausible
+        # rather than tiling a grid across content that isn't this item.
+        plausible_area = expected_qty * med_w * med_h
+        oversized = plausible_area > 0 and (ew * eh) > plausible_area * 3.0
+        if ew <= 0 or eh <= 0 or not contains_sample or oversized:
             extent = None
 
     if extent is None:

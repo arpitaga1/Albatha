@@ -20,11 +20,48 @@ consistent by GTIN/batch across every invoice the same product appears in —
 GTIN 00300036120018/Batch 2120209 is always "Paracetamol 500mg Tablets",
 wherever it shows up.
 """
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
+from app import config
 from app.models import Invoice, InvoiceLineItem, ScanEvent, TatmeenRecord, SSCCRecord, ValidationResult
 from app.services.extraction import ExtractionResult
 from app.services.pipeline import run_pipeline
+
+# Real client-provided invoice PDFs (committed under app/, unlike the
+# ephemeral UPLOADS_DIR) for the "Start New Validation" preloaded-invoice
+# dropdown — copied into UPLOADS_DIR at seed time, exactly like a real
+# upload's bytes, so they're servable at /api/files/<name> and the invoice
+# preview panel can show the actual PDF instead of a reconstructed table.
+_PRELOADED_PDF_DIR = Path(__file__).resolve().parent.parent / "seed_assets" / "preloaded_invoices"
+
+
+def _seed_preloaded_pdf(invoice_number: str) -> str | None:
+    src = _PRELOADED_PDF_DIR / f"invoice_{invoice_number}.pdf"
+    if not src.exists():
+        return None
+    save_name = f"preloaded_{invoice_number}.pdf"
+    pdf_bytes = src.read_bytes()
+    (config.UPLOADS_DIR / save_name).write_bytes(pdf_bytes)
+
+    # Also render page 1 to a plain PNG (naming convention: swap the
+    # extension for "_preview.png", derived client-side too — see
+    # StartNewValidationPage.tsx) so the invoice preview panel can show a
+    # flat image instead of embedding the PDF. Chrome's built-in PDF viewer
+    # carries its own floating toolbar (download/print/more) that can't be
+    # suppressed via URL fragment params in current versions — a plain
+    # <img> has none of that chrome at all.
+    try:
+        import fitz
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pix = doc[0].get_pixmap(dpi=200)
+        preview_name = save_name.replace(".pdf", "_preview.png")
+        (config.UPLOADS_DIR / preview_name).write_bytes(pix.tobytes("png"))
+    except Exception:
+        pass  # preview image is a nice-to-have; the PDF link still works without it
+
+    return save_name
 
 # Consistent product names, keyed by the identifier that recurs across flows.
 PARACETAMOL = "Paracetamol 500mg Tablets"       # GTIN 00300036120018 / Batch 2120209 — real Item 1 data
@@ -250,6 +287,166 @@ def seed_all(db: Session) -> None:
                    invoice_number="INV005", item_qty=8, reported=False),
     ]
     db.add_all(sscc_rows)
+    db.commit()
+
+    # ---- Pre-uploaded invoices for the "Start New Validation" quick-scan
+    # flow (nav item -> dropdown -> camera -> Start Analysis -> existing
+    # details page). A second, independent batch of real client-provided
+    # invoice fixtures (7 PDFs dated 02.09.2026), transcribed verbatim —
+    # real GTIN/batch/qty/expiry, not fabricated. source="preloaded" keeps
+    # them out of the "Invoices from SAP" list (sap_source.py filters
+    # strictly on source=="sap") while still routing through the real
+    # (non-mock) RealScanFlow, same as any user upload — see
+    # ValidationWizardPage's source in ("upload", "preloaded") branch.
+    AURA_LOTION = "Aura Whitening Body Lotion 200ML"
+    LUMINA_GEL = "Lumina Hydra Eye Contour Gel 15ML"
+    SOLEIL_CREAM = "Soleil Protect Sun Cream SPF50+ 40ML"
+    _preloaded_common = dict(
+        sold_to="MPC Drug Store Company L.L.C (Sole Proprietorship)",
+        ship_to="Exhibition Showroom No1, Jurf Indus, Ajman",
+        invoice_date="2026-09-02", demo_flow=None, source="preloaded",
+    )
+
+    pre1 = Invoice(invoice_number="206205020", supplier="Invoice 1 - All Reported (Homogeneous)", **_preloaded_common)
+    pre1.line_items = [
+        InvoiceLineItem(item_name=AURA_LOTION, gtin="00840149658751", batch="MF1204",
+                         expiry="2026-07-31", qty=96, uom="EA", category="pharma"),
+    ]
+
+    pre2 = Invoice(invoice_number="206205010", supplier="Invoice 2 - All Reported (Mixed Items)", **_preloaded_common)
+    pre2.line_items = [
+        InvoiceLineItem(item_name=AURA_LOTION, gtin="00840149658751", batch="MF1204",
+                         expiry="2026-07-31", qty=36, uom="EA", category="pharma"),
+        InvoiceLineItem(item_name=LUMINA_GEL, gtin="00300036120018", batch="2120209",
+                         expiry="2026-06-30", qty=3, uom="EA", category="pharma"),
+        InvoiceLineItem(item_name=SOLEIL_CREAM, gtin="03664798023251", batch="4I016",
+                         expiry="2026-05-31", qty=5, uom="EA", category="pharma"),
+    ]
+
+    pre3 = Invoice(invoice_number="206205011", supplier="Invoice 3 - Partially Reported (Mixed Items)", **_preloaded_common)
+    pre3.line_items = [
+        InvoiceLineItem(item_name=AURA_LOTION, gtin="00840149658751", batch="MF1204",
+                         expiry="2026-07-31", qty=24, uom="EA", category="pharma"),
+        InvoiceLineItem(item_name=LUMINA_GEL, gtin="00300036120018", batch="2120209",
+                         expiry="2026-06-30", qty=6, uom="EA", category="pharma"),
+        InvoiceLineItem(item_name=SOLEIL_CREAM, gtin="03664798023251", batch="4I016",
+                         expiry="2026-05-31", qty=9, uom="EA", category="pharma"),
+    ]
+
+    pre4 = Invoice(invoice_number="206205012", supplier="Invoice 4 - Reported SSCC (Mixed Items)", **_preloaded_common)
+    pre4.line_items = [
+        InvoiceLineItem(item_name=AURA_LOTION, gtin="00840149658751", batch="MF1204",
+                         expiry="2026-07-31", qty=24, uom="EA", category="pharma", sscc="00262970013531261111"),
+        InvoiceLineItem(item_name=LUMINA_GEL, gtin="00300036120018", batch="2120209",
+                         expiry="2026-06-30", qty=3, uom="EA", category="pharma", sscc="00262970013531261111"),
+        InvoiceLineItem(item_name=SOLEIL_CREAM, gtin="03664798023251", batch="4I016",
+                         expiry="2026-05-31", qty=4, uom="EA", category="pharma", sscc="00262970013531261111"),
+    ]
+
+    pre5 = Invoice(invoice_number="206205013", supplier="Invoice 5 - Non-Reported SSCC (Mixed Items)", **_preloaded_common)
+    pre5.line_items = [
+        InvoiceLineItem(item_name=SOLEIL_CREAM, gtin="03664798023251", batch="4I016",
+                         expiry="2026-05-31", qty=2, uom="EA", category="pharma", sscc="00262970013531262222"),
+        InvoiceLineItem(item_name=AURA_LOTION, gtin="00840149658751", batch="MF1204",
+                         expiry="2026-07-31", qty=12, uom="EA", category="pharma", sscc="00262970013531262222"),
+    ]
+
+    pre6 = Invoice(invoice_number="206205014", supplier="Invoice 6 - Non-Pharma (Mixed Items)", **_preloaded_common)
+    pre6.line_items = [
+        InvoiceLineItem(item_name=name, gtin=None, batch="-", expiry=None, qty=qty, uom="EA", category="non_pharma")
+        for name, qty in [
+            ("Wella Koleston Naturals - Brilliant Brown 5/37", 3),
+            ("Wella Koleston7 - Mahogany 5/5", 1),
+            ("Wella Koleston (307/11)", 2),
+            ("Wella Koleston Naturals - Mocha 5/73", 1),
+            ("Wella Koleston Naturals - Golden Wheat 8/1", 1),
+            ("Wella Koleston Naturals - Dark Chestnut 3/4", 2),
+            ("Wella Koleston7 - Light Blonde 8/0", 4),
+            ("Wella Koleston7 - Extra Light Blonde 9/0", 1),
+            ("Wella Koleston7 (shade unlabeled)", 1),
+            ("Wella Koleston7 - Violet Auburn 3/66", 1),
+            ("Wella Koleston Naturals - Deep Fig 3/0", 1),
+            ("Wella Koleston7 - Cherry Red 66/46", 3),
+            ("Radian Massage Cream", 12),
+            ("Sudocrem Antiseptic Healing Cream (tub)", 2),
+        ]
+    ]
+
+    pre7 = Invoice(invoice_number="206205021", supplier="Invoice 7 - Bulk Pallet (Merck)", **_preloaded_common)
+    pre7.line_items = [
+        InvoiceLineItem(item_name="Euthyrox 150NF-100IR/KW/LB/OM/QA/AE/BH/SY", gtin="04061842487837", batch="G02Y8V",
+                         expiry="2028-09-30", qty=240, uom="EA", category="pharma"),
+        InvoiceLineItem(item_name="Glucophage XR 500MG (RM) Tabs - (30) UAE/BHR", gtin="24054839745182", batch="Y20404",
+                         expiry="2029-05-31", qty=1056, uom="EA", category="pharma"),
+    ]
+
+    for inv in (pre1, pre2, pre3, pre4, pre5, pre6, pre7):
+        inv.source_file_name = _seed_preloaded_pdf(inv.invoice_number)
+        db.add(inv)
+    db.commit()
+
+    tatmeen_preloaded = [
+        TatmeenRecord(gtin="00840149658751", batch="MF1204", serial=None,
+                      invoice_number="206205020", reported=True, reported_qty=96,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+
+        TatmeenRecord(gtin="00840149658751", batch="MF1204", serial=None,
+                      invoice_number="206205010", reported=True, reported_qty=36,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="00300036120018", batch="2120209", serial=None,
+                      invoice_number="206205010", reported=True, reported_qty=3,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="03664798023251", batch="4I016", serial=None,
+                      invoice_number="206205010", reported=True, reported_qty=5,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+
+        # Invoice 3: Lumina deliberately left unreported - the "Partially Reported" scenario.
+        TatmeenRecord(gtin="00840149658751", batch="MF1204", serial=None,
+                      invoice_number="206205011", reported=True, reported_qty=24,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="00300036120018", batch="2120209", serial=None,
+                      invoice_number="206205011", reported=False, reported_qty=0,
+                      sscc=None, sscc_reported=False, reporting_date=None),
+        TatmeenRecord(gtin="03664798023251", batch="4I016", serial=None,
+                      invoice_number="206205011", reported=True, reported_qty=9,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+
+        TatmeenRecord(gtin="00840149658751", batch="MF1204", serial=None,
+                      invoice_number="206205012", reported=True, reported_qty=24,
+                      sscc="00262970013531261111", sscc_reported=True, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="00300036120018", batch="2120209", serial=None,
+                      invoice_number="206205012", reported=True, reported_qty=3,
+                      sscc="00262970013531261111", sscc_reported=True, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="03664798023251", batch="4I016", serial=None,
+                      invoice_number="206205012", reported=True, reported_qty=4,
+                      sscc="00262970013531261111", sscc_reported=True, reporting_date="2026-09-01"),
+
+        # Invoice 5: items themselves reported, but the SSCC is not (SSCCRecord below).
+        TatmeenRecord(gtin="03664798023251", batch="4I016", serial=None,
+                      invoice_number="206205013", reported=True, reported_qty=2,
+                      sscc="00262970013531262222", sscc_reported=False, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="00840149658751", batch="MF1204", serial=None,
+                      invoice_number="206205013", reported=True, reported_qty=12,
+                      sscc="00262970013531262222", sscc_reported=False, reporting_date="2026-09-01"),
+
+        # Invoice 6 is non-pharma - no Tatmeen rows (rule 16: skipped entirely).
+
+        TatmeenRecord(gtin="04061842487837", batch="G02Y8V", serial=None,
+                      invoice_number="206205021", reported=True, reported_qty=240,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+        TatmeenRecord(gtin="24054839745182", batch="Y20404", serial=None,
+                      invoice_number="206205021", reported=True, reported_qty=1056,
+                      sscc=None, sscc_reported=False, reporting_date="2026-09-01"),
+    ]
+    db.add_all(tatmeen_preloaded)
+
+    sscc_preloaded = [
+        SSCCRecord(sscc_code="00262970013531261111", parent_sscc=None,
+                   invoice_number="206205012", item_qty=31, reported=True),
+        SSCCRecord(sscc_code="00262970013531262222", parent_sscc=None,
+                   invoice_number="206205013", item_qty=14, reported=False),
+    ]
+    db.add_all(sscc_preloaded)
     db.commit()
 
     # ---- Baseline scans, so the Dashboard isn't all-zero on first load ----

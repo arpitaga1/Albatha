@@ -21,7 +21,7 @@ export interface Invoice {
   supplier: string;
   invoice_date: string;
   demo_flow: number | null;
-  source: "sap" | "upload";
+  source: "sap" | "upload" | "preloaded";
   source_file_name: string | null;
   line_items: LineItem[];
 }
@@ -56,6 +56,7 @@ export interface ScannedData {
   image_name: string | null;
   annotated_image_name: string | null;
   method: "barcode" | "opencv" | null;
+  notes: string[];
 }
 
 export interface ValidationResult {

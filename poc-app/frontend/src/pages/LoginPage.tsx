@@ -25,7 +25,7 @@ export default function LoginPage() {
     const result = await login(email, password);
     if (result.ok) {
       setStatus("success");
-      setTimeout(() => navigate("/dashboard"), 700);
+      setTimeout(() => navigate("/validate-new"), 700);
     } else {
       setStatus("error");
       setError(result.error ?? "Login failed");

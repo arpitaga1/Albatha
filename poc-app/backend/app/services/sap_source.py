@@ -43,6 +43,14 @@ def get_invoice_from_sap(db: Session, invoice_number: str) -> Invoice | None:
     )
 
 
+def get_preloaded_invoices(db: Session) -> list[Invoice]:
+    """The 'Pre-uploaded Invoices' dropdown on the Start New Validation
+    screen — real client-provided invoice fixtures (seed_data.py, tagged
+    source="preloaded"), separate from the SAP demo flows above. Routes
+    through the real (non-mock) scan pipeline like any user upload."""
+    return db.query(Invoice).filter(Invoice.source == "preloaded").order_by(Invoice.invoice_number).all()
+
+
 # --- Search-any-invoice-number support (per user request) ---
 # A real SAP connection would legitimately return SOME record for any valid
 # invoice number the warehouse types in — this POC has only ever shipped 8

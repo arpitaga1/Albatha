@@ -13,13 +13,14 @@ import { X } from "lucide-react";
  * is where the detail lives now, on demand.
  */
 export default function Modal({
-  open, onClose, title, children, wide = false,
+  open, onClose, title, children, wide = false, fullScreen = false,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
   wide?: boolean;
+  fullScreen?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -35,7 +36,7 @@ export default function Modal({
       {open && (
         <motion.div
           initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8"
+          className={`fixed inset-0 z-50 flex items-center justify-center ${fullScreen ? "p-0 sm:p-4" : "p-4 sm:p-8"}`}
           style={{ background: "rgba(10,20,18,0.45)" }}
           onClick={onClose}
         >
@@ -60,7 +61,11 @@ export default function Modal({
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.18 }}
             onClick={(e) => e.stopPropagation()}
-            className={`w-full ${wide ? "max-w-3xl" : "max-w-xl"} max-h-[85vh] rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden`}
+            className={
+              fullScreen
+                ? "w-full h-full sm:w-[96vw] sm:h-[94vh] rounded-none sm:rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden"
+                : `w-full ${wide ? "max-w-3xl" : "max-w-xl"} max-h-[85vh] rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden`
+            }
           >
             <div
               className="flex items-center justify-between px-5 py-3.5 border-b shrink-0"

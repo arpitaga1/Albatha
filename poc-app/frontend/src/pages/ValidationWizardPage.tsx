@@ -76,26 +76,29 @@ export default function ValidationWizardPage() {
 
   if (!invoice) return <div className="p-8 text-[var(--color-muted)]">Loading…</div>;
 
-  // --- Real, freshly-uploaded invoice: genuinely different flow, no seeded
-  // steps, no fake stepper — extraction already happened at upload time.
-  // Branches on `source`, not `demo_flow` — INV008 (the bonus pending-status
-  // demo) has demo_flow=null but source="sap", so demo_flow alone would have
-  // misrouted it into this real-upload branch. Caught while wiring the
-  // unified Start Validation page together. ---
-  if (invoice.source === "upload") {
+  // --- Real, freshly-uploaded invoice (or a pre-uploaded fixture routed
+  // through the same real pipeline via the Start New Validation screen):
+  // genuinely different flow, no seeded steps, no fake stepper — extraction
+  // already happened at upload/seed time. Branches on `source`, not
+  // `demo_flow` — INV008 (the bonus pending-status demo) has demo_flow=null
+  // but source="sap", so demo_flow alone would have misrouted it into this
+  // real-upload branch. Caught while wiring the unified Start Validation
+  // page together. ---
+  if (invoice.source === "upload" || invoice.source === "preloaded") {
     return (
       <div className="px-8 py-8 max-w-5xl">
-        <Link to="/validate" className="text-sm text-[var(--color-accent)] hover:underline">
-          ← Upload a different invoice
-        </Link>
-        <div className="flex items-center gap-3 mt-3 mb-1">
-          <h1 className="text-2xl font-bold">{invoice.invoice_number}</h1>
-          <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}>
-            Real upload - live extraction
-          </span>
+        {invoice.source === "preloaded" ? (
+          <Link to="/validate-new" className="text-sm text-[var(--color-accent)] hover:underline">
+            ← Start New Validation
+          </Link>
+        ) : (
+          <Link to="/validate" className="text-sm text-[var(--color-accent)] hover:underline">
+            ← Upload a different invoice
+          </Link>
+        )}
+        <div className="mt-3">
+          <RealScanFlow invoice={invoice} />
         </div>
-        <p className="text-sm text-[var(--color-muted)] mb-6">{invoice.sold_to}</p>
-        <RealScanFlow invoice={invoice} />
       </div>
     );
   }
@@ -105,7 +108,7 @@ export default function ValidationWizardPage() {
   return (
     <div className="px-8 py-8 max-w-5xl">
       <Link to="/validate" className="text-sm text-[var(--color-accent)] hover:underline">
-        ← Back to Start Validation
+        ← Back to Upload Invoice
       </Link>
 
       <div className="flex items-center justify-between mt-3 mb-1">

@@ -59,25 +59,49 @@ def run_pipeline(db: Session, line_item: InvoiceLineItem, extraction: Extraction
     # Goes through the TatmeenAdapter exclusively — see tatmeen_adapter.py.
     # A real Tatmeen API integration later only requires changing that one
     # module; nothing here needs to know the difference.
+    #
+    # Per user directive: Tatmeen validation only runs once item count,
+    # GTIN, batch, and serial number are ALL confirmed matching — those 4
+    # checks only, independent of anything else (expiry, UOM, etc. don't
+    # gate it). invoice_match_status already covers GTIN+batch identity
+    # (rule 2, including its own batch-mismatch check); quantity_status
+    # covers count (rule 8); the duplicate-serial finding (rule 3) is this
+    # pipeline's serial-integrity check. If any of those is unresolved,
+    # Tatmeen is withheld — tatmeen_status stays at its "n_a" default
+    # (genuinely not checked yet) rather than reporting against data that's
+    # still known to be wrong.
     if ve.is_pharma(line_item):
         adapter = TatmeenAdapter(db)
-        check = adapter.check_item(line_item.gtin, line_item.batch, line_item.invoice.invoice_number, line_item.qty)
+        serial_ok = not any(f.rule == "3-duplicate-check" and f.severity == "fail" for f in result.findings)
+        tatmeen_ready = (
+            result.invoice_match_status == "green"
+            and result.quantity_status == "green"
+            and serial_ok
+        )
 
-        if check.failed:
-            # "Tatmeen Validation Failed" (spec §9) — the system could not
-            # complete the check at all, distinct from a business "not
-            # reported" result.
-            result.add("14-tatmeen-reported", "fail",
-                        f"Tatmeen Validation Failed — the system could not complete this check ({check.failure_reason}).")
-            result.tatmeen_status = "red"
-        else:
-            reported = ve.rule_tatmeen_reported(check.record, result)
-            if not reported:
-                ve.rule_pending_window(check.record, result)
+        if tatmeen_ready:
+            check = adapter.check_item(line_item.gtin, line_item.batch, line_item.invoice.invoice_number, line_item.qty)
+
+            if check.failed:
+                # "Tatmeen Validation Failed" (spec §9) — the system could not
+                # complete the check at all, distinct from a business "not
+                # reported" result.
+                result.add("14-tatmeen-reported", "fail",
+                            f"Tatmeen Validation Failed — the system could not complete this check ({check.failure_reason}).")
+                result.tatmeen_status = "red"
             else:
-                ve.rule_tatmeen_quantity(line_item.qty, check.record.reported_qty, result)
+                reported = ve.rule_tatmeen_reported(check.record, result)
+                if not reported:
+                    ve.rule_pending_window(check.record, result)
+                else:
+                    ve.rule_tatmeen_quantity(line_item.qty, check.record.reported_qty, result)
+        else:
+            result.add("14-tatmeen-reported", "info",
+                        "Tatmeen validation withheld until item count, GTIN, batch, and serial number all match.")
 
-        # --- SSCC Validation stage (rule 17) ---
+        # --- SSCC Validation stage (rule 17) --- independent of the
+        # Tatmeen gate above; a case-level check even while unit-level
+        # identity/quantity still needs fixing.
         if line_item.sscc:
             sscc_records = adapter.check_sscc_hierarchy(line_item.invoice.invoice_number)
             ve.rule_sscc_hierarchy(sscc_records, result)

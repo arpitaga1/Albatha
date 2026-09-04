@@ -88,6 +88,7 @@ export default function ItemsTable({
                 {scannedCount > 0 && <th className="py-2 px-4">Scanned Qty</th>}
                 <th className="py-2 px-4">Status</th>
                 {scannedCount > 0 && <th className="py-2 px-4">Tatmeen</th>}
+                {scannedCount > 0 && <th className="py-2 px-4">Issues</th>}
                 {scannedCount > 0 && <th className="py-2 px-4"></th>}
               </tr>
             </thead>
@@ -125,6 +126,37 @@ export default function ItemsTable({
   );
 }
 
+// Short, plain-language tags for a real, human-relevant finding that ISN'T
+// one of the 4 critical count/GTIN/batch/serial checks (those already
+// drive the Status column below) and isn't Tatmeen-related (the dedicated
+// Tatmeen column already covers that) - e.g. "Expired". Per user
+// directive: once count, GTIN, serial, and batch all match, the Status
+// column should just read "Matched" - any other real issue moves here
+// instead of making Status itself read as a mismatch. Deliberately
+// excludes internal extraction-confidence signals (rules 1 and 12) - those
+// are system-side data-quality noise, not something a reviewer needs to
+// act on as a business issue.
+const ISSUE_TAG_RULES: Record<string, (message: string) => string> = {
+  "10-expiry-alert": (msg) => (msg.toLowerCase().includes("already expired") ? "Expired" : "Near Expiry"),
+  "7-date-sanity": () => "Date Mismatch",
+  "6-gtin-checksum": () => "GTIN Checksum",
+  "9-uom-consistency": () => "UOM Mismatch",
+  "17-sscc-hierarchy": () => "SSCC Issue",
+};
+
+function issueTags(result: ValidationResult | undefined): string[] {
+  if (!result) return [];
+  const tags: string[] = [];
+  for (const f of result.findings) {
+    if (f.severity !== "fail" && f.severity !== "warning") continue;
+    const make = ISSUE_TAG_RULES[f.rule];
+    if (!make) continue;
+    const tag = make(f.message);
+    if (!tags.includes(tag)) tags.push(tag);
+  }
+  return tags;
+}
+
 function ItemRow({
   lineItem, result, showPostScanColumns, tatmeenRevealed, tatmeenChecking, onEditQty, onOpenDetails,
 }: {
@@ -141,6 +173,11 @@ function ItemRow({
   const batchMismatch = !!(lineItem.batch && scanned?.batch && scanned.batch !== lineItem.batch);
   const status = rowStatus(result);
   const hasIssue = status === "red" || status === "orange";
+  const tags = issueTags(result);
+  // The Status dot itself only ever reflects the 4 critical checks - an
+  // "orange" (a real but non-critical issue, now shown in the Issues
+  // column instead) reads as a clean "Matched" here.
+  const dotStatus = status === "orange" ? "green" : status;
 
   return (
     <tr className="border-b last:border-0 hover:bg-[var(--color-paper)] transition-colors" style={{ borderColor: "var(--color-line)" }}>
@@ -162,7 +199,7 @@ function ItemRow({
         </td>
       )}
       <td className="py-2 px-4">
-        <StatusDot status={status} />
+        <StatusDot status={dotStatus} />
       </td>
       {showPostScanColumns && (
         <td className="py-2 px-4">
@@ -172,6 +209,25 @@ function ItemRow({
             revealed={tatmeenRevealed}
             checking={tatmeenChecking}
           />
+        </td>
+      )}
+      {showPostScanColumns && (
+        <td className="py-2 px-4">
+          {tags.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {tags.map((t) => (
+                <span
+                  key={t}
+                  className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full whitespace-nowrap"
+                  style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
+                >
+                  {t}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="text-[var(--color-muted)]">-</span>
+          )}
         </td>
       )}
       {showPostScanColumns && (
@@ -193,7 +249,7 @@ function ItemRow({
 
 // Per client feedback: the table should show the Tatmeen result too, not
 // just the invoice-match status - "Not Verified" before the bulk action
-// has run, then "Valid"/"Invalid" (or "Pending" for the grace-window
+// has run, then "Reported"/"Not Reported" (or "Pending" for the grace-window
 // case) once it has. Non-pharma items never go through Tatmeen at all
 // (rule 16), so they read "N/A" rather than an unexplained blank cell.
 function TatmeenCell({
@@ -230,7 +286,7 @@ function TatmeenCell({
     return (
       <span className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--color-green)" }}>
         <CheckCircle2 size={13} strokeWidth={2.5} />
-        Valid
+        Reported
       </span>
     );
   }
@@ -242,10 +298,21 @@ function TatmeenCell({
       </span>
     );
   }
+  if (result.tatmeen_status === "n_a") {
+    // Withheld server-side - count/GTIN/batch/serial weren't all matching
+    // at scan time, so Tatmeen was never actually checked. Distinct from
+    // "Not Reported" (a real Tatmeen result saying not-reported/insufficient).
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[var(--color-muted)]">
+        <Clock size={12} strokeWidth={2.5} />
+        Not Checked
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--color-red)" }}>
       <XCircle size={13} strokeWidth={2.5} />
-      Invalid
+      Not Reported
     </span>
   );
 }

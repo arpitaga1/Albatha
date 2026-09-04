@@ -1,9 +1,15 @@
-import { CheckCircle2, Clock, AlertTriangle, MinusCircle, Circle } from "lucide-react";
+import { CheckCircle2, AlertCircle, AlertTriangle, MinusCircle, Circle } from "lucide-react";
 import type { Status } from "../types";
 
+// "yellow" covers two real cases: a genuine non-critical warning (e.g.
+// expired stock - see finalize_overall_status) and Tatmeen's own pending-
+// confirmation state. "Pending" read as "nothing's wrong, just waiting" for
+// the first case, which is misleading - "Warning" fits both (the Tatmeen
+// spot already adds its own "pending confirmation" text right next to this
+// badge, so no information is lost there).
 const STYLES: Record<Status, { bg: string; fg: string; ring: string; label: string; Icon: typeof CheckCircle2 }> = {
   green: { bg: "var(--color-green-tint)", fg: "var(--color-green)", ring: "#bfe0cd", label: "Validated", Icon: CheckCircle2 },
-  yellow: { bg: "var(--color-yellow-tint)", fg: "var(--color-yellow)", ring: "#eecf9e", label: "Pending", Icon: Clock },
+  yellow: { bg: "var(--color-yellow-tint)", fg: "var(--color-yellow)", ring: "#eecf9e", label: "Warning", Icon: AlertCircle },
   red: { bg: "var(--color-red-tint)", fg: "var(--color-red)", ring: "#f0bcb7", label: "Manual Intervention", Icon: AlertTriangle },
   n_a: { bg: "#f1f3f2", fg: "var(--color-muted)", ring: "#dfe5e2", label: "N/A", Icon: MinusCircle },
   pending: { bg: "#f1f3f2", fg: "var(--color-muted)", ring: "#dfe5e2", label: "Not scanned", Icon: Circle },

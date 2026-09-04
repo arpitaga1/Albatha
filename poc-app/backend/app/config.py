@@ -50,6 +50,17 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.75"))
 EXTRACTION_MODE = os.environ.get("EXTRACTION_MODE", "mock")  # "mock" | "live"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# Real-scan happy-flow guarantee (per explicit user directive): when on, any
+# photo uploaded to /api/scans/upload-real - including a brand-new one
+# captured live from the camera, for any invoice - reports an exact match
+# against that invoice's own line items, instead of depending on the live
+# barcode/OpenCV pipeline reproducing the same read reliably during a live
+# demo. The only photos that still show the recapture prompt are the
+# explicit reject entries in pinned_scans.py. Set to "false" to fall back to
+# the live detection pipeline for every non-reject-pinned photo (the
+# genuinely-tested-for-accuracy behavior from earlier in this project).
+SCAN_HAPPY_FLOW = os.environ.get("SCAN_HAPPY_FLOW", "true").lower() == "true"
+
 # Comma-separated list of frontend origins allowed to call this API. Local
 # dev origins are always included so `npm run dev` keeps working without
 # any env var set; add the deployed frontend's real origin (e.g. a Vercel
