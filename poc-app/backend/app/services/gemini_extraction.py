@@ -150,11 +150,22 @@ def human_readable_error(e: Exception) -> tuple[int, str]:
     Classifies a failed Gemini call into (http_status, client-safe message)
     - per user directive, no raw error JSON should ever reach the frontend
     (this is shown live in front of clients during demos). Distinct
-    messages for daily-quota-exhausted vs. short-term-rate-limited vs.
-    transient-overload, since "try again in a moment" is actively
-    misleading for a daily quota that won't reset for hours.
+    messages for billing/credits-exhausted vs. daily-quota-exhausted vs.
+    short-term-rate-limited vs. transient-overload, since "try again in a
+    moment" is actively misleading for anything that won't resolve on its
+    own (confirmed directly: a real failure here was billing exhaustion -
+    "Your prepayment credits are depleted" - which was getting
+    misclassified as the generic rate-limit message telling the user to
+    just wait, when nothing was going to change until someone added
+    credits).
     """
     text = str(e)
+    if "prepayment credit" in text.lower() or "manage your project and billing" in text.lower():
+        return 429, (
+            "The Gemini account has run out of prepaid credits. An admin needs to add billing "
+            "credits via Google AI Studio (or the LLM gateway) before scans will work again - "
+            "this will not resolve on its own."
+        )
     if "PerDay" in text or ("RESOURCE_EXHAUSTED" in text and "quota" in text.lower()):
         return 429, (
             "This API key has reached its daily usage limit. It will reset automatically, "
