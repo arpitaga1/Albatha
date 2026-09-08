@@ -84,3 +84,13 @@ ALLOWED_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",
     *[o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()],
 ]
+
+# Vercel gives every deployment its own unique URL (e.g.
+# https://albatha-3lesizhn4-damco-sales.vercel.app) in ADDITION to the
+# stable custom domain (https://albatha-indol.vercel.app) - only the
+# latter is normally in ALLOWED_ORIGINS above, so anyone opening a
+# specific deployment's own URL (which the Vercel dashboard's own "Visit"
+# button links to) hits a CORS error. This regex matches any deployment
+# URL for this Vercel project so that keeps working without needing
+# ALLOWED_ORIGINS updated on every single deploy.
+ALLOWED_ORIGIN_REGEX = os.environ.get("ALLOWED_ORIGIN_REGEX", r"^https://albatha(-[a-z0-9]+)*\.vercel\.app$")
