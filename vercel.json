@@ -1,0 +1,8 @@
+{
+  "buildCommand": "cd poc-app/frontend && npm ci && npm run build",
+  "outputDirectory": "poc-app/frontend/dist",
+  "installCommand": "echo skip-root-install",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
