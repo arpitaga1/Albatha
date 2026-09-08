@@ -2,6 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle, Image as ImageIcon, ExternalLink, UserCheck, ScanSearch } from "lucide-react";
 import { api, fileUrl } from "../api";
+import { formatApiError } from "../errors";
 import type { Invoice, UnmatchedBarcode, ValidationResult } from "../types";
 
 /**
@@ -44,7 +45,7 @@ export default function UnmatchedItemCard({
       const result = await api.manualAssign(invoice.invoice_number, Number(lineItemId), { gtin, batch, qty, expiry, note });
       onAssigned(result);
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setBusy(false);
     }

@@ -3,8 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, ExternalLink, FileSearch, FileText, Loader2, PackageSearch, ScanLine, Sparkles } from "lucide-react";
 import { api, fileUrl } from "../api";
+import { formatApiError } from "../errors";
 import ScannerFrame from "../components/ScannerFrame";
 import RecaptureModal from "../components/RecaptureModal";
+import AnalyzingModal from "../components/AnalyzingModal";
 import type { Invoice, SapInvoiceRow } from "../types";
 
 /**
@@ -33,18 +35,33 @@ export default function StartNewValidationPage() {
   const [rejection, setRejection] = useState<{ message: string } | null>(null);
 
   useEffect(() => {
-    api.listPreloadedInvoices().then(setInvoices).catch(() => setInvoices([]));
+    api.listPreloadedInvoices().then((invs) => {
+      // Sort by the "Invoice N" ordinal embedded in the supplier label
+      // (e.g. "Invoice 1 - All Reported…") rather than the invoice_number
+      // string, which doesn't run in the same order the demo flows do.
+      const ordinal = (inv: SapInvoiceRow) => Number(inv.supplier.match(/^Invoice (\d+)/)?.[1] ?? Infinity);
+      setInvoices([...invs].sort((a, b) => ordinal(a) - ordinal(b)));
+    }).catch(() => setInvoices([]));
   }, []);
 
   // Preview the selected invoice in the space next to the scanner, instead
   // of leaving it blank — a user picking from the dropdown should be able
   // to see what they're about to scan against at a glance.
+  const [previewBust, setPreviewBust] = useState(0);
   useEffect(() => {
     if (!selected) { setInvoiceDetail(null); return; }
     let cancelled = false;
     setDetailLoading(true);
     api.getInvoice(selected).then((inv) => {
-      if (!cancelled) setInvoiceDetail(inv);
+      if (!cancelled) {
+        setInvoiceDetail(inv);
+        // Cache-bust the preview image: a preloaded invoice's underlying
+        // PDF can be swapped out on disk (same filename) between demo
+        // sessions, and the browser has no way to know that on its own -
+        // without this it keeps showing whatever it cached the first time
+        // this exact URL was requested, stale forever.
+        setPreviewBust(Date.now());
+      }
     }).catch(() => {
       if (!cancelled) setInvoiceDetail(null);
     }).finally(() => {
@@ -75,35 +92,37 @@ export default function StartNewValidationPage() {
       // Artificial minimum wait so the button feels like it's actually
       // scanning the photo rather than resolving instantly - real scan time
       // still wins if it happens to take longer than this floor.
+      // Per explicit user directive, this flow always uses Gemini 3.5 Flash
+      // vision extraction now - no engine choice exposed in the UI.
       const [res] = await Promise.all([
-        api.uploadRealScan(selected, files),
+        api.uploadGeminiScan(selected, files),
         new Promise((resolve) => setTimeout(resolve, 3000)),
       ]);
-      // Block navigation whenever the scan wasn't clean - not just when
-      // the backend rejected it outright (results.length === 0), but also
-      // whenever it found stock that doesn't belong to this invoice
-      // (res.unmatched, e.g. unrelated products mixed into the same
-      // photo). Checking `unmatched` directly here is deliberate: it's
-      // real data already present in the response regardless of how any
-      // backend rejection heuristic classified the photo, so it can't
-      // silently miss a case the way a threshold-tuned gate can.
-      const unmatchedCount = res.unmatched.reduce((s, u) => s + u.count, 0);
-      if (res.results.length === 0 || unmatchedCount > 0) {
+      // Block navigation only when the backend genuinely found nothing
+      // usable for THIS invoice (results.length === 0) - the same signal
+      // the backend itself uses to call a photo "not related to this
+      // invoice" (see scan_upload_gemini's own `if not results and
+      // unmatched` branch). Previously this also hard-blocked on ANY
+      // leftover res.unmatched count, even when every real line item on
+      // the invoice matched fine - too strict for non-pharma items with no
+      // GTIN: Gemini's own box-grouping granularity varies call to call
+      // (e.g. sometimes splitting one product into two sub-clusters), which
+      // can leave a small leftover unclaimed group on a genuinely correct
+      // photo. That's real, measured behavior (see Invoice 6's Koleston
+      // line), not a wrong-invoice signal - so it no longer blocks
+      // navigation on its own once real results exist.
+      if (res.results.length === 0) {
         setRejection({
           message:
             res.message ||
-            (unmatchedCount > 0
-              ? `This photo includes ${unmatchedCount} item(s) that don't match any line on ${selected} ` +
-                "(other stock mixed in with what you're validating). Please make sure only this " +
-                "invoice's item(s) are in frame, then rescan."
-              : "Couldn't read a barcode from this photo - try a straight-on, well-lit, uncropped photo of the item label."),
+            "Couldn't read a barcode from this photo - try a straight-on, well-lit, uncropped photo of the item label.",
         });
         setBusy(false);
         return;
       }
       navigate(`/validate/${selected}`);
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
       setBusy(false);
     }
   }
@@ -118,13 +137,18 @@ export default function StartNewValidationPage() {
   }
 
   const ready = Boolean(selected) && files.length > 0 && !busy;
-  const invoiceFileUrl = fileUrl(invoiceDetail?.source_file_name);
+  const rawInvoiceFileUrl = fileUrl(invoiceDetail?.source_file_name);
+  const invoiceFileUrl = rawInvoiceFileUrl ? `${rawInvoiceFileUrl}?v=${previewBust}` : null;
   // Rendered flat image of the PDF's first page - see the matching
   // save_name.replace(...) convention in seed_data.py's _seed_preloaded_pdf.
-  const previewImageUrl = fileUrl(invoiceDetail?.source_file_name?.replace(".pdf", "_preview.png"));
+  // ?v= cache-busts it (see previewBust above) so a swapped-out invoice
+  // file always shows its current content, not whatever the browser
+  // cached the first time this filename was ever requested.
+  const rawPreviewImageUrl = fileUrl(invoiceDetail?.source_file_name?.replace(".pdf", "_preview.png"));
+  const previewImageUrl = rawPreviewImageUrl ? `${rawPreviewImageUrl}?v=${previewBust}` : null;
 
   return (
-    <div className="px-8 py-8 max-w-6xl">
+    <div className="px-8 py-8">
       <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
         <div className="flex items-center gap-3 mb-1">
           <div
@@ -324,6 +348,7 @@ export default function StartNewValidationPage() {
         imagePreview={previews[0] ?? null}
         onRecapture={handleRecapture}
       />
+      <AnalyzingModal active={busy} />
     </div>
   );
 }

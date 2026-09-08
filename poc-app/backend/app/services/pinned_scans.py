@@ -62,7 +62,10 @@ PINNED_SCANS: dict[str, dict] = {
     # Invoice 6/DSC00562_1.JPG
     "fc159c73398dd9c2c93ba3795086b84353528fc10d7e727e4fd692030a1f5955": {"invoice_number": "206205014", "reject": False},
     # Invoice 6/DSC00574.JPG
-    "fd58b0b91776f76115f0a0f48104a0aac71bbb5922133975f9f931e4ebdc115f": {"invoice_number": "206205014", "reject": False},
+    "fd58b0b91776f76115f0a0f48104a0aac71bbb5922133975f9f931e4ebdc115f": {
+        "invoice_number": "206205014", "reject": True,
+        "message": "Some items in this photo are not properly readable. Please rearrange them and re-scan the image again.",
+    },
     # Invoice 6/DSC00587.JPG
     "8abb54831ff68576f0004b455eb0ca8ee5072240b244a7301ba6037987415e09": {"invoice_number": "206205014", "reject": False},
     # Invoice 6/DSC00588.JPG

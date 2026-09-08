@@ -15,19 +15,32 @@ const STYLES: Record<Status, { bg: string; fg: string; ring: string; label: stri
   pending: { bg: "#f1f3f2", fg: "var(--color-muted)", ring: "#dfe5e2", label: "Not scanned", Icon: Circle },
 };
 
-export default function StatusBadge({ status, compact = false }: { status: Status; compact?: boolean }) {
+export default function StatusBadge({
+  status, compact = false, label,
+}: {
+  status: Status;
+  compact?: boolean;
+  // Overrides the default per-item wording (e.g. "Warning", "Manual
+  // Intervention") with different text at the same color/icon - used where
+  // a status is being shown at SHIPMENT level (History's list) rather than
+  // per line item, since "Validated / Partially Validated / Human
+  // Intervention Required" (the same 3-tier wording FinalSummary already
+  // uses) reads correctly there but not on an individual item's row.
+  label?: string;
+}) {
   const s = STYLES[status] ?? STYLES.pending;
   const Icon = s.Icon;
+  const text = label ?? s.label;
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full font-semibold whitespace-nowrap border ${
         compact ? "px-2 py-0.5 text-[11px]" : "px-2.5 py-1 text-xs"
       }`}
       style={{ background: s.bg, color: s.fg, borderColor: s.ring }}
-      title={s.label}
+      title={text}
     >
       <Icon size={compact ? 12 : 13} strokeWidth={2.5} />
-      <span>{s.label}</span>
+      <span>{text}</span>
     </span>
   );
 }

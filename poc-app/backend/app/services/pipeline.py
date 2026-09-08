@@ -35,10 +35,15 @@ def run_pipeline(db: Session, line_item: InvoiceLineItem, extraction: Extraction
     # --- Count verification (rule 1) ---
     ve.rule_count_verification(extraction, result)
 
-    # --- Invoice Validation stage: identity match (rule 2), duplicates (3),
-    #     GTIN checksum (6), date sanity (7), expiry alert (10), UOM (9) ---
+    # --- Invoice Validation stage: identity match (rule 2), GTIN checksum
+    #     (6), date sanity (7), expiry alert (10), UOM (9) ---
+    # Rule 3 (duplicate-serial check) deliberately not called - per user
+    # directive, serial-number matching isn't meaningful validation here:
+    # serials are read on a best-effort basis (often only a couple of
+    # dozen boxes' worth out of a much larger count), so a shared/repeated
+    # partial read looks like a false "duplicate" rather than a real
+    # double-scan. Left in validation_engine.py, just not wired in.
     ve.rule_identity_matching(line_item, extraction, result)
-    ve.rule_duplicate_check(extraction, result)
     ve.rule_gtin_checksum(extraction, result)
     ve.rule_date_sanity(extraction, result)
     ve.rule_expiry_alert(extraction, result)

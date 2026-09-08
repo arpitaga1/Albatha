@@ -1,6 +1,8 @@
+import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { AlertTriangle, Camera, X } from "lucide-react";
+import { playRecaptureBuzzer } from "../utils/sound";
 
 /**
  * Shown instead of navigating anywhere / instead of adding anything to the
@@ -22,6 +24,13 @@ export default function RecaptureModal({
   imagePreview: string | null;
   onRecapture: () => void;
 }) {
+  // Audible cue the moment this pops up - a buzzer-type tone fits "this
+  // photo can't be used" better than a generic chime. Synthesized (no
+  // audio file), so it plays whenever `open` flips true, not just once.
+  useEffect(() => {
+    if (open) playRecaptureBuzzer();
+  }, [open]);
+
   return createPortal(
     <AnimatePresence>
       {open && (

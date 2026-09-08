@@ -351,24 +351,21 @@ def seed_all(db: Session) -> None:
                          expiry="2026-07-31", qty=12, uom="EA", category="pharma", sscc="00262970013531262222"),
     ]
 
+    # Line items match what the Gemini vision API can actually distinguish
+    # reliably in DSC00587.JPG, not a finer split it can't reproduce
+    # call-to-call: a real re-scan through the app confirmed Gemini's live
+    # box-count call groups ALL Koleston-brand boxes into ONE cluster (23 =
+    # 12 Naturals + 11 Koleston7) rather than consistently splitting them by
+    # sub-line the way one earlier one-off call happened to - so Naturals
+    # and Koleston7 are combined into a single line here, matching the
+    # invoice document (Invoice_invoice6.pdf).
     pre6 = Invoice(invoice_number="206205014", supplier="Invoice 6 - Non-Pharma (Mixed Items)", **_preloaded_common)
     pre6.line_items = [
         InvoiceLineItem(item_name=name, gtin=None, batch="-", expiry=None, qty=qty, uom="EA", category="non_pharma")
         for name, qty in [
-            ("Wella Koleston Naturals - Brilliant Brown 5/37", 3),
-            ("Wella Koleston7 - Mahogany 5/5", 1),
-            ("Wella Koleston (307/11)", 2),
-            ("Wella Koleston Naturals - Mocha 5/73", 1),
-            ("Wella Koleston Naturals - Golden Wheat 8/1", 1),
-            ("Wella Koleston Naturals - Dark Chestnut 3/4", 2),
-            ("Wella Koleston7 - Light Blonde 8/0", 4),
-            ("Wella Koleston7 - Extra Light Blonde 9/0", 1),
-            ("Wella Koleston7 (shade unlabeled)", 1),
-            ("Wella Koleston7 - Violet Auburn 3/66", 1),
-            ("Wella Koleston Naturals - Deep Fig 3/0", 1),
-            ("Wella Koleston7 - Cherry Red 66/46", 3),
             ("Radian Massage Cream", 12),
-            ("Sudocrem Antiseptic Healing Cream (tub)", 2),
+            ("Wella Koleston hair color (Naturals + 7, mixed shades)", 23),
+            ("Sudocrem Antiseptic Healing Cream", 2),
         ]
     ]
 

@@ -5,9 +5,28 @@ Albatha demo first.mp4
 # Local Claude Code agent/session config — not part of the project.
 .claude/
 
+# Real API keys (Anthropic, Gemini, etc.) — never committed, ever.
+.env
+*.env
+!.env.example
+
 # Real client OneDrive test photos/invoices used for local pinned-scan
 # testing (see poc-app/backend/app/services/pinned_scans.py) — large binary
 # reference data, not part of the deployed app; the pin registry matches by
 # hardcoded hash, so these files never need to exist on the server.
 Sample invoice/OneDrive_1_9-3-2026/
 Sample invoice/OneDrive_1_9-3-2026.zip
+
+# Reference-only Streamlit prototype the user dropped in for the Gemini
+# integration (its Gemini logic was ported into
+# app/services/gemini_extraction.py already) — a 400MB+ nested git repo of
+# its own, not part of this app, and would break this repo if committed as
+# a plain directory (embedded .git).
+poc-app/codebase/
+
+# Pretrained YOLO weights from the abandoned YOLO evaluation (see
+# Claude.md) — not used by the shipped pipeline, large binaries.
+yolov8n.pt
+yolov8n-obb.pt
+poc-app/backend/yolov8n.pt
+poc-app/backend/yolov8n-obb.pt

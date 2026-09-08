@@ -1,35 +1,22 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import { RotateCcw, Loader2, CheckCircle2 } from "lucide-react";
+import { useState } from "react";
+import { RotateCcw, Loader2, CheckCircle2, Sparkles, ShieldCheck, Database, ScanLine } from "lucide-react";
 import { api } from "../api";
-
-interface Finding {
-  rule: string;
-  severity: string;
-  message: string;
-}
-interface Scenario {
-  description: string;
-  findings: Finding[];
-}
-interface Result {
-  scenario_a_foreign_serial: Scenario;
-  scenario_b_case_mismatch: Scenario;
-}
 
 type ReseedState = "idle" | "confirm" | "busy" | "done" | "error";
 
-export default function SsccDemoPage() {
-  const [result, setResult] = useState<Result | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reseedState, setReseedState] = useState<ReseedState>("idle");
+// Purely a dummy status display, per user directive - these toggles don't
+// call the backend or configure anything; they just show which
+// integrations this POC has wired up, all on, for the client demo.
+const INTEGRATIONS = [
+  { name: "AI Vision", description: "Box counting & cross-checking against the physical shipment", Icon: Sparkles },
+  { name: "Tatmeen", description: "Simulated national track-and-trace database", Icon: ShieldCheck },
+  { name: "Invoice from SAP", description: "Invoice data sourced directly from SAP", Icon: Database },
+  { name: "Data Extraction", description: "Reads GTIN, batch, expiry, and quantity directly off the item label", Icon: ScanLine },
+];
 
-  useEffect(() => {
-    api
-      .ssccNegativeControl()
-      .then((r) => setResult(r as Result))
-      .catch((e) => setError(String(e)));
-  }, []);
+export default function SsccDemoPage() {
+  const [reseedState, setReseedState] = useState<ReseedState>("idle");
+  const [integrationsOn, setIntegrationsOn] = useState<boolean[]>(INTEGRATIONS.map(() => true));
 
   async function reseed() {
     setReseedState("busy");
@@ -43,18 +30,13 @@ export default function SsccDemoPage() {
   }
 
   return (
-    <div className="px-8 py-8 max-w-3xl">
-      <Link to="/dashboard" className="text-sm text-[var(--color-accent)] hover:underline">
-        ← Dashboard
-      </Link>
-      <h1 className="text-2xl font-bold mt-3 mb-1">SSCC / Case-Containment Negative Control</h1>
-      <p className="text-[var(--color-muted)] mb-6 max-w-xl">
-        Reproduces the Round 13–14 R&amp;D proof: two deliberately-injected faults run against Item 1's
-        real captured data (12 boxes, case <span className="mono">1459466A0</span>), calling this app's
-        actual rule 5 implementation - not the standalone research script - to confirm the shipped code
-        still catches both.
+    <div className="px-8 py-8">
+      <h1 className="text-2xl font-bold mb-1">Configurations</h1>
+      <p className="text-[var(--color-muted)] mb-6 max-w-2xl">
+        System integrations and demo data controls.
       </p>
 
+      {/* --- Reset Demo Data, at the top --- */}
       <div className="rounded-lg border bg-white p-5 mb-8 flex items-center justify-between gap-4" style={{ borderColor: "var(--color-line)" }}>
         <div>
           <h2 className="font-semibold text-sm mb-0.5">Reset Demo Data</h2>
@@ -115,31 +97,70 @@ export default function SsccDemoPage() {
         </p>
       )}
 
-      {error && <p className="text-[var(--color-red)]">{error}</p>}
-      {!result && !error && <p className="text-[var(--color-muted)]">Running…</p>}
-
-      {result && (
-        <div className="grid gap-4">
-          <ScenarioCard title="Scenario A - foreign serial in the case" scenario={result.scenario_a_foreign_serial} />
-          <ScenarioCard title="Scenario B - unit mispacked into the wrong case" scenario={result.scenario_b_case_mismatch} />
+      {/* --- Integrations status --- */}
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)] mb-2.5">
+          Integrations
         </div>
-      )}
-    </div>
-  );
-}
-
-function ScenarioCard({ title, scenario }: { title: string; scenario: Scenario }) {
-  return (
-    <div className="rounded-lg border bg-white p-5" style={{ borderColor: "var(--color-line)" }}>
-      <h2 className="font-semibold mb-1">{title}</h2>
-      <p className="text-sm text-[var(--color-muted)] mb-3">{scenario.description}</p>
-      <ul className="space-y-1 text-sm">
-        {scenario.findings.map((f, i) => (
-          <li key={i} className="text-[var(--color-red)]">
-            <span className="mono text-xs opacity-70">[{f.rule}]</span> {f.message}
-          </li>
-        ))}
-      </ul>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {INTEGRATIONS.map((integ, i) => (
+            <div
+              key={integ.name}
+              className="rounded-lg border bg-white p-4 flex flex-col gap-3"
+              style={{ borderColor: "var(--color-line)" }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div
+                  className="h-9 w-9 rounded-lg flex items-center justify-center shrink-0"
+                  style={{ background: "var(--color-paper)" }}
+                >
+                  <integ.Icon size={16} style={{ color: "var(--color-accent)" }} strokeWidth={2.25} />
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={integrationsOn[i]}
+                  onClick={() => setIntegrationsOn((prev) => prev.map((v, idx) => (idx === i ? !v : v)))}
+                  className="relative shrink-0 transition-colors"
+                  style={{
+                    width: 44,
+                    height: 24,
+                    borderRadius: 999,
+                    boxSizing: "border-box",
+                    background: integrationsOn[i] ? "var(--color-green)" : "var(--color-line)",
+                    border: `1px solid ${integrationsOn[i] ? "var(--color-green)" : "var(--color-muted)"}`,
+                  }}
+                >
+                  <span
+                    className="absolute rounded-full bg-white transition-transform"
+                    style={{
+                      top: 2,
+                      left: 2,
+                      width: 18,
+                      height: 18,
+                      transform: integrationsOn[i] ? "translateX(22px)" : "translateX(0px)",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px rgba(0,0,0,0.06)",
+                    }}
+                  />
+                </button>
+              </div>
+              <div>
+                <div className="text-sm font-semibold">{integ.name}</div>
+                <div className="text-xs text-[var(--color-muted)] mt-0.5">{integ.description}</div>
+              </div>
+              <span
+                className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full w-fit"
+                style={
+                  integrationsOn[i]
+                    ? { background: "var(--color-green-tint)", color: "var(--color-green)" }
+                    : { background: "var(--color-line)", color: "var(--color-muted)" }
+                }
+              >
+                {integrationsOn[i] ? "Integrated" : "Off"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

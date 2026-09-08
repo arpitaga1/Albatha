@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { useAuth, DEMO_CREDENTIALS } from "../context/AuthContext";
+import { useAuth, DEMO_CREDENTIALS, DEMO_USERS } from "../context/AuthContext";
 import albathaLogo from "../assets/albatha-logo.png";
 
 const BLOBS = [
@@ -17,6 +17,13 @@ export default function LoginPage() {
   const [password, setPassword] = useState(DEMO_CREDENTIALS.password);
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
+
+  function selectAccount(acc: (typeof DEMO_USERS)[number]) {
+    setEmail(acc.email);
+    setPassword(acc.password);
+    setStatus("idle");
+    setError(null);
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -64,7 +71,7 @@ export default function LoginPage() {
         initial={{ opacity: 0, y: 24 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.6, ease: "easeOut" }}
-        className="relative z-10 w-full max-w-md mx-4"
+        className="relative z-10 w-full max-w-lg mx-4"
       >
         <div className="mb-8 text-center">
           <motion.div
@@ -76,9 +83,9 @@ export default function LoginPage() {
           >
             <img src={albathaLogo} alt="Albatha" className="h-10 w-10 object-contain" />
           </motion.div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Shipment Validation Platform</h1>
+          <h1 className="text-2xl font-bold text-white tracking-tight">Smart Warehouse Intelligence</h1>
           <p className="text-sm mt-1" style={{ color: "#8fbdb9" }}>
-            Albatha / MPC · Pharma &amp; Non-Pharma Reconciliation POC
+            AI Barcode Reading, OCR &amp; Aggregation · Albatha / MPC Warehouses
           </p>
         </div>
 
@@ -146,18 +153,41 @@ export default function LoginPage() {
             </motion.button>
           </form>
 
-          <div className="mt-5 rounded-lg px-3.5 py-3 text-xs leading-relaxed"
+          <div className="mt-5 rounded-lg px-3 py-2.5 text-xs leading-relaxed"
                style={{ background: "rgba(20,184,166,0.08)", color: "#8fbdb9", border: "1px dashed rgba(20,184,166,0.3)" }}>
-            <span className="font-semibold text-[#5eead4]">Demo credentials</span> (pre-filled - just click Sign in)
-            <div className="mono mt-1 text-white/80">
-              {DEMO_CREDENTIALS.email} / {DEMO_CREDENTIALS.password}
+            <span className="font-semibold text-[#5eead4]">Demo accounts</span> - click one to fill it in
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              {DEMO_USERS.map((acc) => {
+                const active = email.trim().toLowerCase() === acc.email.toLowerCase();
+                return (
+                  <button
+                    key={acc.email}
+                    type="button"
+                    onClick={() => selectAccount(acc)}
+                    className="text-left rounded-md px-2 py-1.5 border transition-colors min-w-0"
+                    style={
+                      active
+                        ? { background: "rgba(20,184,166,0.16)", borderColor: "#14b8a6" }
+                        : { background: "rgba(255,255,255,0.03)", borderColor: "rgba(255,255,255,0.12)" }
+                    }
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="font-semibold text-white/90 text-[11px] truncate">{acc.name}</span>
+                    </div>
+                    <span
+                      className="inline-block text-[9px] font-semibold px-1.5 py-0.5 rounded-full mt-1"
+                      style={{ background: "rgba(20,184,166,0.18)", color: "#5eead4" }}
+                    >
+                      {acc.role}
+                    </span>
+                    <div className="mono mt-1 text-white/55 text-[9px] leading-tight break-all">{acc.email}</div>
+                    <div className="mono text-white/55 text-[9px]">{acc.password}</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
-
-        <p className="text-center text-xs mt-6" style={{ color: "#5a827e" }}>
-          Proof-of-concept build - no real credentials, invoices, or Tatmeen data.
-        </p>
       </motion.div>
     </div>
   );

@@ -17,3 +17,12 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Gemini vision (box counting/cross-check on real scans - see
+      # app/services/gemini_extraction.py). Routed through the company LLM
+      # gateway, not Google's public API directly - set GEMINI_BASE_URL to
+      # that gateway's URL alongside the key issued for it. Required for
+      # real (non-mock) item-photo scans to work at all in production.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_BASE_URL
+        sync: false

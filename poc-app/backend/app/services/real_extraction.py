@@ -1036,14 +1036,63 @@ def _fit_full_grid(
     _, rows, cols = best
 
     cell_w, cell_h = ew / cols, eh / rows
-    grid_boxes = [
-        (int(ex + c * cell_w), int(ey + r * cell_h), int(cell_w), int(cell_h))
-        for r in range(rows) for c in range(cols)
-    ]
+
+    # A single rigid, evenly-spaced grid tiled across the whole extent
+    # assumes perfectly uniform, unwarped spacing — wrong on a real top-down
+    # photo, where perspective makes rows/columns drift further from evenly
+    # spaced the further they are from wherever the real sample happened to
+    # anchor (a real, measured failure: several of DSC00571's 96 grid-fit
+    # boxes landed on bare cardboard between labels, not on the labels
+    # themselves). Fixed by keeping every ACTUALLY-detected sample box
+    # exactly where its own contour said it is, and only synthesizing a
+    # position for a genuinely empty cell — interpolated from that cell's
+    # own row/column of real neighbors, not from the global grid formula.
+    def _cell_index(cx: float, cy: float) -> tuple[int, int]:
+        r = min(rows - 1, max(0, int((cy - ey) / cell_h)))
+        c = min(cols - 1, max(0, int((cx - ex) / cell_w)))
+        return r, c
+
+    cell_to_box: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+    for b in sample_boxes:
+        bx, by, bw, bh = b
+        cx, cy = bx + bw / 2, by + bh / 2
+        r, c = _cell_index(cx, cy)
+        # A cell can only hold one real box - if two samples land in the
+        # same cell (an off-by-one at a boundary), keep whichever is
+        # larger (more likely a genuine full detection, not a sliver).
+        existing = cell_to_box.get((r, c))
+        if existing is None or (bw * bh) > (existing[2] * existing[3]):
+            cell_to_box[(r, c)] = b
+
+    row_centers: dict[int, list[float]] = {}
+    col_centers: dict[int, list[float]] = {}
+    for (r, c), (bx, by, bw, bh) in cell_to_box.items():
+        row_centers.setdefault(r, []).append(by + bh / 2)
+        col_centers.setdefault(c, []).append(bx + bw / 2)
+    global_row_y = ey + cell_h / 2
+    global_col_x = ex + cell_w / 2
+
+    grid_boxes = []
+    synthesized = 0
+    for r in range(rows):
+        for c in range(cols):
+            if (r, c) in cell_to_box:
+                grid_boxes.append(cell_to_box[(r, c)])
+                continue
+            synthesized += 1
+            # Interpolate from this row's and this column's own real
+            # neighbors (local signal) rather than the rigid global cell
+            # formula - falls back to the global grid position only when
+            # NO real box exists anywhere in that row or column to learn
+            # from.
+            row_y = float(np.median(row_centers[r])) if r in row_centers else ey + r * cell_h + cell_h / 2
+            col_x = float(np.median(col_centers[c])) if c in col_centers else ex + c * cell_w + cell_w / 2
+            grid_boxes.append((int(col_x - med_w / 2), int(row_y - med_h / 2), int(med_w), int(med_h)))
 
     if debug:
         print(f"[detect_item_boxes] grid-fit: sample={len(sample_boxes)}/{expected_qty}, "
-              f"extent={extent} (via {extent_source}), fitted {rows}x{cols}={len(grid_boxes)} boxes")
+              f"extent={extent} (via {extent_source}), fitted {rows}x{cols}={len(grid_boxes)} boxes "
+              f"({len(cell_to_box)} kept as real detections, {synthesized} interpolated from row/col neighbors)")
 
     return grid_boxes
 
@@ -1052,6 +1101,16 @@ _LABEL_GTIN_RE = re.compile(r"GTIN[:\s]*([0-9]{8,14})", re.IGNORECASE)
 _LABEL_BATCH_RE = re.compile(r"Lot(?:/Batch)?[:\s]*([A-Za-z0-9\-]{3,15})", re.IGNORECASE)
 _LABEL_EXPIRY_RE = re.compile(r"Exp\.?[:\s]*([0-9]{4}[\-/][A-Za-z0-9]{2,4}(?:[\-/][0-9]{1,2})?)", re.IGNORECASE)
 _LABEL_SERIAL_RE = re.compile(r"S[\\/]?N[:\s]*([0-9]{6,20})", re.IGNORECASE)
+
+# Fallback patterns for labels with no "Lot:"/"Exp:" prefix words at all —
+# just bare positional fields (confirmed on the real Aura/MF1204 label:
+# batch code alone on its own line, then Mfg date, then Exp date, then only
+# "SN:" has an actual prefix). The above prefixed patterns simply never
+# match this template, not because OCR failed - a real label-template
+# difference, consistent with this project's own "check the label template
+# before assuming a read failed" methodology.
+_BARE_BATCH_RE = re.compile(r"\b([A-Z]{1,3}[0-9]{3,6})\b")
+_BARE_DATE_RE = re.compile(r"\b(\d{2}[/\-]\d{4})\b")
 
 # Tesseract digit/lookalike-letter confusion, e.g. "41016" -> "4I016" (the
 # "1" read as capital "I"). GTIN/Serial can't suffer this silently — their
@@ -1081,6 +1140,42 @@ def _fix_ocr_digit_lookalikes(batch: str) -> str:
     return "".join(_DIGIT_LOOKALIKES.get(c.upper(), c) for c in batch)
 
 
+def _extract_label_fields(text: str) -> dict:
+    """Pulls GTIN/batch/expiry/serial out of one OCR text block. Tries the
+    labeled patterns first (a real "Lot:"/"Exp:" prefix word); a label with
+    no prefix words at all (bare positional fields - see _BARE_BATCH_RE/
+    _BARE_DATE_RE above) falls back to those instead of coming back empty."""
+    gtin_m = _LABEL_GTIN_RE.search(text)
+    batch_m = _LABEL_BATCH_RE.search(text)
+    expiry_m = _LABEL_EXPIRY_RE.search(text)
+    serial_m = _LABEL_SERIAL_RE.search(text)
+
+    batch = _fix_ocr_digit_lookalikes(batch_m.group(1)) if batch_m else None
+    expiry = expiry_m.group(1) if expiry_m else None
+
+    if not batch:
+        bare_batch_m = _BARE_BATCH_RE.search(text)
+        if bare_batch_m:
+            batch = bare_batch_m.group(1)
+    if not expiry:
+        bare_dates = _BARE_DATE_RE.findall(text)
+        if bare_dates:
+            # Two bare dates with no labels = Mfg then Exp (per the real
+            # label layout this was built against) - Exp is always the
+            # later one, not just "whichever came second" in OCR reading
+            # order (a rotation/reading-order slip could reverse them).
+            def _year(d: str) -> int:
+                return int(d.split("/")[-1].split("-")[-1])
+            expiry = max(bare_dates, key=_year)
+
+    return {
+        "gtin": gtin_m.group(1) if gtin_m else None,
+        "batch": batch,
+        "expiry": expiry,
+        "serial": serial_m.group(1) if serial_m else None,
+    }
+
+
 def ocr_box_label(image_bytes: bytes, box: tuple[int, int, int, int]) -> dict:
     """
     Local OCR (Tesseract, no API/no key) on one detected box crop — reads
@@ -1090,6 +1185,13 @@ def ocr_box_label(image_bytes: bytes, box: tuple[int, int, int, int]) -> dict:
     digit errors) — long numeric strings are the least reliable OCR
     target, consistent with this project's earliest R&D finding (Round 1-2).
     Returned fields are best-effort hints, not barcode-verified reads.
+
+    Tries the crop both upright and rotated 180° and keeps whichever
+    orientation reads more fields — a top-down photo of a packed carton
+    frequently has every label printed upside-down relative to the camera
+    (confirmed on the real Aura/MF1204 grid: 0 of 96 crops read anything
+    at 0°, the same crops read cleanly once rotated), and there's no way
+    to know which orientation is correct ahead of time.
     """
     x, y, bw, bh = box
     arr = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -1099,18 +1201,17 @@ def ocr_box_label(image_bytes: bytes, box: tuple[int, int, int, int]) -> dict:
     scale = max(1, 600 // max(crop_pil.width, 1))
     if scale > 1:
         crop_pil = crop_pil.resize((crop_pil.width * scale, crop_pil.height * scale), Image.LANCZOS)
-    text = pytesseract.image_to_string(crop_pil, config="--psm 6")
 
-    gtin_m = _LABEL_GTIN_RE.search(text)
-    batch_m = _LABEL_BATCH_RE.search(text)
-    expiry_m = _LABEL_EXPIRY_RE.search(text)
-    serial_m = _LABEL_SERIAL_RE.search(text)
-    return {
-        "gtin": gtin_m.group(1) if gtin_m else None,
-        "batch": _fix_ocr_digit_lookalikes(batch_m.group(1)) if batch_m else None,
-        "expiry": expiry_m.group(1) if expiry_m else None,
-        "serial": serial_m.group(1) if serial_m else None,
-    }
+    best_fields = None
+    best_hits = -1
+    for candidate in (crop_pil, crop_pil.rotate(180)):
+        text = pytesseract.image_to_string(candidate, config="--psm 6")
+        fields = _extract_label_fields(text)
+        hits = sum(1 for v in fields.values() if v)
+        if hits > best_hits:
+            best_hits = hits
+            best_fields = fields
+    return best_fields
 
 
 def extract_via_opencv(image_bytes: bytes, expected_qty: int | None = None) -> dict:

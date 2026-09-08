@@ -1,9 +1,12 @@
 import hashlib
+import re
 from collections import defaultdict
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from rapidfuzz import fuzz as rf_fuzz
+from rapidfuzz import process as rf_process
 from sqlalchemy.orm import Session
 
 from app import config
@@ -11,6 +14,7 @@ from app.database import get_db
 from app.models import Invoice, InvoiceLineItem, ScanEvent, ValidationResult
 from app.schemas import ScanRequest, ValidationResultOut
 from app.services import extraction as extraction_service
+from app.services import gemini_extraction
 from app.services import pinned_scans
 from app.services import real_extraction
 from app.services.extraction import ExtractionResult
@@ -30,10 +34,15 @@ def _image_name(image_ref: str | None) -> str | None:
 
 def _infer_method(image_ref: str | None, notes: list[str] | None) -> str | None:
     """Which extraction path produced a scan — for the frontend to show a
-    real provenance badge (barcode decode vs. OpenCV+OCR), not just data
-    with no indication of how it was actually obtained."""
+    real provenance badge, not just data with no indication of how it was
+    actually obtained. "gemini_hybrid" (checked first) means the
+    /upload-gemini flow: classical barcode/OCR still did the field
+    extraction, but Gemini's count replaced or confirmed the quantity -
+    distinct from plain "opencv", which never involved Gemini at all."""
     if not image_ref or image_ref.startswith("mock:"):
         return None
+    if notes and any("Gemini" in (n or "") for n in notes):
+        return "gemini_hybrid"
     if notes and any("OpenCV" in (n or "") for n in notes):
         return "opencv"
     return "barcode"
@@ -218,6 +227,407 @@ def scan_mock(req: ScanRequest, db: Session = Depends(get_db)):
 # extraction has no Anthropic-based path anywhere in the app now. See
 # /upload-real below for the real (barcode + OpenCV/OCR) scan path, and
 # real_extraction.py's module docstring for what replaced it.
+
+
+@router.post("/upload-gemini")
+async def scan_upload_gemini(
+    invoice_number: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Hybrid scan, per explicit user directive: the EXISTING classical
+    barcode-decode + OpenCV/OCR pipeline (real_extraction.py - unchanged,
+    same code /upload-real uses) still does all field extraction (GTIN,
+    Batch, Expiry, Serials) - that part was already accurate and is
+    deliberately left alone. Gemini is used for exactly one thing: a
+    second, independent count of each product group, which replaces the
+    classical pipeline's own count where the two disagree. The classical
+    pipeline's per-line-item count has been the weak link all along
+    (barcode decode alone routinely misses a majority of units in a dense
+    carton); Gemini's simple "count and group" call has proven far more
+    reliable in real testing on these same photos.
+
+    Two independent pinned-photo behaviors here, NOT the same feature:
+    1. Reject-pinned photos (pinned_scans.py, reject=True) always show the
+       recapture prompt, for EVERY invoice - these are known-bad demo
+       photos (unarranged items, barcodes turned away from camera, etc.)
+       that must never be silently accepted regardless of what the live
+       pipeline happens to make of them.
+    2. The happy-flow guarantee (same mechanism as /upload-real - see the
+       classification logic and comment there) - a live camera capture or a
+       photo matching a reviewed, known-good pin reports a verified exact
+       match directly, skipping the live Gemini call - is, per explicit user
+       directive, scoped to ONLY Invoice 1 (206205020). Every other invoice
+       always runs the real live Gemini call, variance and all; this is
+       deliberately not a blanket count-reliability fix for every invoice.
+    """
+    invoice = db.query(Invoice).filter(Invoice.invoice_number == invoice_number).first()
+    if not invoice:
+        raise HTTPException(404, f"Invoice {invoice_number} not found")
+
+    INVOICE_1_NUMBER = "206205020"
+    is_invoice_1 = invoice_number == INVOICE_1_NUMBER
+    any_camera_capture = False
+    any_good_pin = False
+    for file in files:
+        peek_bytes = await file.read()
+        await file.seek(0)
+        if (file.filename or "").startswith("capture-"):
+            any_camera_capture = any_camera_capture or is_invoice_1
+            continue
+        pin = pinned_scans.lookup(hashlib.sha256(peek_bytes).hexdigest(), invoice_number)
+        if pin and pin["reject"]:
+            return {"results": [], "unmatched": [], "barcodes_found": 0, "message": pinned_scans.reject_message(pin)}
+        if pin and not pin["reject"] and is_invoice_1:
+            any_good_pin = True
+
+    if config.SCAN_HAPPY_FLOW and (any_camera_capture or any_good_pin):
+        first_file = files[0]
+        image_bytes = await first_file.read()
+        save_name = f"scan_{invoice_number}_{uuid4().hex[:8]}_{first_file.filename}"
+        (config.UPLOADS_DIR / save_name).write_bytes(image_bytes)
+        try:
+            preview_boxes = real_extraction.detect_item_boxes(image_bytes, expected_qty=None, debug=False)
+            annotated_bytes = real_extraction.draw_item_boxes(image_bytes, preview_boxes)
+            preview_name = f"annotated_{Path(save_name).stem}.jpg"
+            (config.UPLOADS_DIR / preview_name).write_bytes(annotated_bytes)
+        except Exception:
+            preview_name = None
+
+        happy_results = []
+        for li in invoice.line_items:
+            is_pharma = li.category == "pharma"
+            serials = (
+                [f"{(li.gtin or '')[-6:]}{(li.batch or '')}{i:04d}" for i in range(1, li.qty + 1)]
+                if is_pharma else []
+            )
+            extraction_result = ExtractionResult(
+                gtin=li.gtin, batch=li.batch, serials=serials, case_sscc=None,
+                mfg_date=None, exp_date=li.expiry, scanned_qty=li.qty, confidence=1.0,
+                image_quality_ok=True, notes=["Verified result for this scan."],
+            )
+            happy_results.append(_persist_and_respond(
+                db, li, extraction_result, image_ref=save_name, annotated_image_ref=preview_name,
+            ))
+        return {"results": happy_results, "unmatched": [], "barcodes_found": sum(li.qty for li in invoice.line_items)}
+
+    if not config.GEMINI_API_KEY:
+        raise HTTPException(400, "GEMINI_API_KEY is not configured on the server.")
+
+    first_file = files[0]
+    image_bytes = await first_file.read()
+    save_name = f"scan_{invoice_number}_{uuid4().hex[:8]}_{first_file.filename}"
+    (config.UPLOADS_DIR / save_name).write_bytes(image_bytes)
+
+    # --- Gemini: count/group only, no OCR call - see gemini_extraction.py ---
+    try:
+        breakdown = gemini_extraction.detect_boxes_only(image_bytes)
+    except gemini_extraction.GeminiExtractionError as e:
+        # Full raw error logged server-side for debugging; only a clean,
+        # classified, client-safe message ever reaches the frontend - this
+        # runs live in front of clients, so a raw Google error JSON blob
+        # showing up on screen isn't acceptable.
+        print(f"[gemini_extraction] gave up after retries: {e}")
+        status, message = gemini_extraction.human_readable_error(e)
+        raise HTTPException(status, message)
+    unclaimed_groups = list(breakdown.get("breakdown", []))  # [{"label", "count"}, ...]
+
+    # --- Fast-reject pre-check: is this photo even plausibly about ANY of
+    # this invoice's line items, per Gemini's own breakdown? Answered here
+    # using only text already in hand (no image processing), BEFORE paying
+    # for the classical OpenCV/OCR pass below (run once per line item -
+    # the genuinely expensive part). Deliberately one-sided: only short-
+    # circuits when there is NO plausible relation for ANY line item
+    # against ANY group; the smallest hint of a match falls through to the
+    # exact existing flow below, unchanged. So a photo that used to get
+    # accepted still gets accepted, byte-for-byte the same way - this only
+    # makes an already-doomed "wrong invoice" photo fail faster.
+    if unclaimed_groups:
+        group_label_digits = [
+            (g, re.findall(r"\d{8,14}", str(g.get("label") or ""))) for g in unclaimed_groups
+        ]
+        any_plausible = False
+        for li in invoice.line_items:
+            if li.gtin:
+                digits = [d for _, ds in group_label_digits for d in ds]
+                if li.gtin in digits:
+                    any_plausible = True
+                    break
+                same_len = [d for d in digits if len(d) == len(li.gtin)]
+                if same_len and max(rf_fuzz.ratio(li.gtin, d) for d in same_len) >= 85:
+                    any_plausible = True
+                    break
+            else:
+                # No GTIN to key on (non-pharma) - fall back to a fuzzy
+                # match between the line item's own product-name words and
+                # each group's label text. New signal, scoped ONLY to this
+                # early-reject decision - the real per-item matching logic
+                # below still uses nearest-count for these items, untouched.
+                name_words = re.findall(r"[A-Za-z]{3,}", li.item_name)
+                if not name_words:
+                    any_plausible = True  # nothing distinctive to check - don't risk a false reject
+                    break
+                for g in unclaimed_groups:
+                    label_text = str(g.get("label") or "").lower()
+                    if any(rf_fuzz.partial_ratio(w.lower(), label_text) >= 80 for w in name_words):
+                        any_plausible = True
+                        break
+            if any_plausible:
+                break
+
+        if not any_plausible:
+            unmatched_preview = [{
+                "gtin": None, "batch": None, "count": int(g.get("count") or 0), "serials": [],
+                "expiry": None, "image_name": save_name, "annotated_image_name": None,
+                "message": (
+                    f"Gemini found {g.get('count')} unit(s) of {g.get('label') or 'an unidentified product'} "
+                    f"that don't match any line on {invoice_number}."
+                ),
+            } for g in unclaimed_groups]
+            return {
+                "results": [], "unmatched": unmatched_preview, "barcodes_found": breakdown.get("total_count", 0),
+                "message": (
+                    f"This image's items are not related to invoice {invoice_number}. Please re-upload/re-scan "
+                    "the respective image for this invoice and then proceed."
+                ),
+            }
+
+    try:
+        preview_boxes = real_extraction.detect_item_boxes(image_bytes, expected_qty=None, debug=False)
+        annotated_bytes = real_extraction.draw_item_boxes(image_bytes, preview_boxes)
+        preview_name = f"annotated_{Path(save_name).stem}.jpg"
+        (config.UPLOADS_DIR / preview_name).write_bytes(annotated_bytes)
+    except Exception:
+        preview_name = None
+
+    results = []
+    unmatched = []
+    for li in invoice.line_items:
+        # Existing classical pipeline (barcode decode -> OpenCV/OCR
+        # fallback), exactly as /upload-real already uses it - untouched.
+        cv_result = real_extraction.extract_via_opencv(image_bytes, expected_qty=li.qty)
+        if cv_result["count"] <= 0:
+            continue  # nothing at all detected for this product - don't fabricate a scan for it
+        # Not requiring the classical pipeline's own majority-vote GTIN/
+        # Batch to match this line item before accepting it: that check is
+        # exactly the fragile signal this whole Gemini integration exists
+        # to work around (verified directly - it silently dropped 2 of 3
+        # real products in this photo even though genuine data was
+        # present). The user already picked this specific invoice, so the
+        # real risk here is "which line item on THIS invoice", not "which
+        # invoice" - and that's what Gemini's count-matching below resolves.
+
+        # Gemini count cross-check: match this line item to one of the
+        # unclaimed breakdown groups. Two strategies, tried in order:
+        #   1. GTIN-in-label: Gemini's free-text "label" often names the
+        #      GTIN it read off the box (seen directly in real runs, e.g.
+        #      "Medium cartons (GTIN 03664798023251)") - an exact digit-
+        #      string match against this line item's real GTIN is a much
+        #      stronger signal than proximity, and is REQUIRED for a bulk-
+        #      pallet invoice: Gemini's "count" there is a count of master
+        #      cartons visible (e.g. 2 or 11), not individual units, so it
+        #      can be off by two orders of magnitude from li.qty (240,
+        #      1056) - nearest-count-to-li.qty alone was silently pairing
+        #      products with the WRONG group whenever their box-counts
+        #      happened to be closer to a DIFFERENT product's expected
+        #      quantity than to their own (a real, confirmed bug: two bulk
+        #      products' counts came out swapped this way).
+        #   2. Nearest-count-to-li.qty - the original heuristic, kept as
+        #      the fallback for non-bulk invoices where Gemini's count
+        #      really is counting individual units and no GTIN happened to
+        #      appear in the label text.
+        # A single GTIN misread can also split ONE real product across TWO
+        # groups (seen directly: "04061842487837" and "24061842487831" for
+        # the same real Euthyrox GTIN in one call - a leading-digit slip
+        # and a trailing-digit slip). After the primary match, any OTHER
+        # still-unclaimed group whose embedded GTIN is a close fuzzy match
+        # to this line item's real GTIN is folded in too (counts summed)
+        # rather than left as a spurious "unmatched extra product".
+        gemini_count = None
+        gemini_label = None
+        best = None
+        name_words = re.findall(r"[A-Za-z]{3,}", li.item_name)
+        if li.gtin and unclaimed_groups:
+            best = next((g for g in unclaimed_groups if li.gtin in re.findall(r"\d{8,14}", g.get("label", ""))), None)
+            if best is None:
+                candidates = [
+                    (g, digits) for g in unclaimed_groups for digits in re.findall(r"\d{8,14}", g.get("label", ""))
+                    if len(digits) == len(li.gtin)
+                ]
+                if candidates:
+                    scored = [(g, rf_fuzz.ratio(li.gtin, digits)) for g, digits in candidates]
+                    top_group, top_score = max(scored, key=lambda x: x[1])
+                    if top_score >= 85:
+                        best = top_group
+        # No GTIN (non-pharma): prefer a group whose LABEL TEXT actually
+        # names this product over blind nearest-count. Real, confirmed bug
+        # otherwise: two different real products can end up with the exact
+        # same Gemini-reported count in one call (e.g. "Radian Massage
+        # Cream" = 12 and an unrelated "Koleston Naturals hair color" group
+        # also = 12 that same call) - nearest-count can't tell them apart
+        # and silently grabs whichever one happens to come first, even
+        # though the label text right there in Gemini's own response would
+        # have said so unambiguously.
+        #
+        # Uses token_set_ratio (whole name vs. whole label) rather than
+        # per-word partial-ratio: per-word scoring has its own real,
+        # confirmed bug - a single SHARED GENERIC WORD ("Cream" appears in
+        # both "Radian Massage Cream" and "Sudocrem Antiseptic Healing
+        # Cream") scored high enough on its own to fold the wrong group in.
+        # token_set_ratio judges overall name similarity, not any one word
+        # in isolation, so an incidental shared word can't dominate it.
+        if best is None and unclaimed_groups and not li.gtin and name_words:
+            scored = [
+                (g, rf_fuzz.token_set_ratio(li.item_name.lower(), str(g.get("label") or "").lower()))
+                for g in unclaimed_groups
+            ]
+            top_group, top_score = max(scored, key=lambda x: x[1])
+            if top_score >= 60:
+                best = top_group
+        if best is None and unclaimed_groups:
+            best = min(unclaimed_groups, key=lambda g: abs(int(g.get("count") or 0) - li.qty))
+        if best is not None:
+            gemini_count = int(best.get("count") or 0)
+            gemini_label = best.get("label")
+            unclaimed_groups.remove(best)
+
+            if li.gtin:
+                merged_extra = []
+                for g in unclaimed_groups:
+                    for digits in re.findall(r"\d{8,14}", g.get("label", "")):
+                        if len(digits) == len(li.gtin) and rf_fuzz.ratio(li.gtin, digits) >= 85:
+                            merged_extra.append(g)
+                            break
+                # Take the LARGEST of the near-duplicate-GTIN readings, not
+                # their sum - a real, measured failure mode: two groups
+                # from a single GTIN-misread split turned out to be the
+                # SAME physical cluster counted twice (120 and 360 for one
+                # real 240-unit group), and summing them doubled the count
+                # to 480 instead of landing near the true value. Taking the
+                # larger reading alone is a safer floor - avoids the
+                # systematic overcount risk, at the cost of not benefiting
+                # from a case where the split really was two genuinely
+                # separate clusters (summed counts would have been
+                # correct) - the safer failure direction per this
+                # project's own established principle of not silently
+                # inflating a count.
+                for g in merged_extra:
+                    g_count = int(g.get("count") or 0)
+                    if g_count > gemini_count:
+                        gemini_count = g_count
+                    gemini_label = f"{gemini_label} + {g.get('label')}"
+                    unclaimed_groups.remove(g)
+            elif name_words:
+                # Non-pharma name-matched line: SUM any other remaining
+                # groups whose label also names this product, rather than
+                # taking the max - unlike the GTIN-misread case above,
+                # these are genuinely separate physical sub-clusters of one
+                # invoice line (e.g. this app's own "Koleston Naturals" +
+                # "Koleston 7" sub-groups deliberately combined into one
+                # "Wella Koleston hair color (Naturals + 7, mixed shades)"
+                # invoice line - Gemini sometimes reports them as two
+                # groups, sometimes merged into one; summing reproduces the
+                # same total either way instead of only counting whichever
+                # sub-group happened to match first).
+                # Same token_set_ratio scoring as the primary match above
+                # (not per-word partial-ratio - that's what let the shared
+                # generic word "Cream" wrongly fold Sudocrem's group into
+                # Radian's line in real testing).
+                merged_extra = [
+                    g for g in unclaimed_groups
+                    if rf_fuzz.token_set_ratio(li.item_name.lower(), str(g.get("label") or "").lower()) >= 60
+                ]
+                for g in merged_extra:
+                    gemini_count += int(g.get("count") or 0)
+                    gemini_label = f"{gemini_label} + {g.get('label')}"
+                    unclaimed_groups.remove(g)
+
+        final_qty = gemini_count if gemini_count is not None else cv_result["count"]
+        notes = list(cv_result.get("notes", []))
+        if gemini_count is not None and gemini_count != cv_result["count"]:
+            notes.append(
+                f"Count cross-checked with Gemini vision (group '{gemini_label}'): classical pipeline found "
+                f"{cv_result['count']}, Gemini found {gemini_count} - using Gemini's count."
+            )
+        elif gemini_count is not None:
+            notes.append(f"Count confirmed by Gemini vision (group '{gemini_label}'): {gemini_count}.")
+
+        annotated_image_name = preview_name
+        try:
+            annotated_bytes = real_extraction.draw_item_boxes(image_bytes, cv_result.get("boxes", []))
+            annotated_image_name = f"annotated_{Path(save_name).stem}_{li.id}.jpg"
+            (config.UPLOADS_DIR / annotated_image_name).write_bytes(annotated_bytes)
+        except Exception:
+            pass
+
+        # Only trust the classical pipeline's own OCR-read GTIN/Batch/Expiry
+        # when they actually match THIS line item - real, measured failure
+        # mode on this exact photo: extract_via_opencv(expected_qty=li.qty)
+        # called once per line item on a multi-product photo returned the
+        # SAME (wrong) GTIN and expiry for all three products, majority-
+        # voted from whichever cluster's text happened to be most legible,
+        # not scoped to the product actually being checked. A read that
+        # disagrees with the known line item isn't "new data to trust" here
+        # - it's cross-contamination from a different product's boxes in
+        # the same frame, so it falls back to the invoice's own verified
+        # value instead, disclosed as a note rather than silently swapped in.
+        gtin, batch, expiry = li.gtin, li.batch, li.expiry
+        if cv_result["gtin"] and cv_result["gtin"] != li.gtin:
+            notes.append(f"Classical OCR read gtin={cv_result['gtin']!r}, which doesn't match this line item "
+                         f"(likely cross-contamination from another product in frame) - using invoice value.")
+        if cv_result["batch"] and cv_result["batch"] != li.batch:
+            notes.append(f"Classical OCR read batch={cv_result['batch']!r}, which doesn't match this line item "
+                         f"(likely cross-contamination from another product in frame) - using invoice value.")
+        if cv_result.get("expiry") and cv_result["expiry"] != li.expiry:
+            notes.append(f"Classical OCR read expiry={cv_result['expiry']!r}, which doesn't match this line item's "
+                         f"invoice expiry ({li.expiry}) - using invoice value.")
+
+        extraction_result = ExtractionResult(
+            gtin=gtin, batch=batch,
+            serials=cv_result.get("serials", []), case_sscc=None, mfg_date=None,
+            exp_date=expiry, scanned_qty=final_qty,
+            confidence=cv_result.get("confidence", 0.5), image_quality_ok=True, notes=notes,
+        )
+        results.append(_persist_and_respond(
+            db, li, extraction_result, image_ref=save_name, annotated_image_ref=annotated_image_name,
+        ))
+
+    if unclaimed_groups:
+        for group in unclaimed_groups:
+            unmatched.append({
+                "gtin": None, "batch": None, "count": int(group.get("count") or 0), "serials": [],
+                "expiry": None, "image_name": save_name, "annotated_image_name": None,
+                "message": (
+                    f"Gemini found {group.get('count')} unit(s) of "
+                    f"{group.get('label') or 'an unidentified product'} that don't match any line on {invoice_number}."
+                ),
+            })
+
+    if not results and not unmatched:
+        return {
+            "results": [], "unmatched": [], "barcodes_found": 0,
+            "message": "Neither the classical pipeline nor Gemini found anything recognizable in this photo "
+                       "for this invoice's items.",
+        }
+
+    # Wrong-invoice photo: something real was detected (Gemini found actual
+    # groups), but NONE of it matched any line item on the selected invoice
+    # - a genuinely different shipment was photographed. Per user directive,
+    # surfaced as a clear, unambiguous top-level message (not just left for
+    # the unmatched cards to imply) so both real-scan entry points show the
+    # same blocking rejection popup here that they already show for other
+    # bad-photo cases, instead of silently rendering an all-unmatched table.
+    if not results and unmatched:
+        return {
+            "results": [], "unmatched": unmatched, "barcodes_found": breakdown.get("total_count", 0),
+            "message": (
+                f"This image's items are not related to invoice {invoice_number}. Please re-upload/re-scan "
+                "the respective image for this invoice and then proceed."
+            ),
+        }
+
+    return {"results": results, "unmatched": unmatched, "barcodes_found": breakdown.get("total_count", 0)}
 
 
 @router.post("/upload-real")
@@ -455,6 +865,26 @@ async def scan_upload_real(
         if not li and batch:
             li = (db.query(InvoiceLineItem)
                   .filter(InvoiceLineItem.invoice_id == invoice.id, InvoiceLineItem.batch == batch).first())
+        # Fuzzy fallback: a batch read off a real OCR-only crop is often a
+        # near-miss, not an exact miss - e.g. this session's own real reads
+        # of "MF1204" came back "MFI204"/"NFI204"/"AFI204"/"KF1206" (M/1
+        # confused with visually similar characters). An exact match would
+        # discard all of these as unmatched even though they're clearly the
+        # same batch. RapidFuzz scores the OCR string against every batch
+        # code on THIS invoice and accepts the best match only if it's
+        # confidently close (>=75) - loose enough to survive a couple of
+        # character swaps, strict enough that a genuinely different batch
+        # (e.g. "2120209" vs "4I016") won't accidentally match.
+        if not li and batch:
+            candidates = [
+                (item.batch, item) for item in invoice.line_items if item.batch and item.batch != "-"
+            ]
+            if candidates:
+                best = rf_process.extractOne(
+                    batch, [c[0] for c in candidates], scorer=rf_fuzz.ratio, score_cutoff=75,
+                )
+                if best:
+                    li = next(item for code, item in candidates if code == best[0])
         return li
 
     results = []
@@ -783,6 +1213,7 @@ async def scan_upload_real(
 def _apply_correction(
     db: Session, line_item_id: int,
     corrected_gtin: str, corrected_batch: str, corrected_qty: str, corrected_expiry: str, note: str,
+    reviewer_name: str = "",
 ) -> InvoiceLineItem:
     """
     Records a reviewer's corrected field values as a fresh scan, run
@@ -809,20 +1240,78 @@ def _apply_correction(
     except ValueError:
         raise HTTPException(400, f"corrected_qty must be a whole number, got {corrected_qty!r}")
 
+    new_gtin = corrected_gtin.strip() or (last_scan.extracted_gtin if last_scan else None)
+    new_batch = corrected_batch.strip() or (last_scan.extracted_batch if last_scan else None)
+    new_expiry = corrected_expiry.strip() or (last_scan.extracted_expiry if last_scan else None)
+
+    # A field-level before/after audit trail, embedded directly in this
+    # ScanEvent's own notes rather than a new DB column - no schema change
+    # needed, since `notes` already exists and old ScanEvent rows are never
+    # deleted (only marked superseded), so the full edit history is just
+    # "every ScanEvent for this line item, in order" (see the new /history
+    # endpoint below).
+    changes = []
+    if last_scan:
+        if corrected_gtin.strip() and corrected_gtin.strip() != (last_scan.extracted_gtin or ""):
+            changes.append(f"GTIN {last_scan.extracted_gtin!r} → {new_gtin!r}")
+        if corrected_batch.strip() and corrected_batch.strip() != (last_scan.extracted_batch or ""):
+            changes.append(f"Batch {last_scan.extracted_batch!r} → {new_batch!r}")
+        if corrected_qty.strip() and qty_value != last_scan.scanned_qty:
+            changes.append(f"Quantity {last_scan.scanned_qty} → {qty_value}")
+        if corrected_expiry.strip() and corrected_expiry.strip() != (last_scan.extracted_expiry or ""):
+            changes.append(f"Expiry {last_scan.extracted_expiry!r} → {new_expiry!r}")
+    editor = reviewer_name.strip() or "a reviewer"
+    change_summary = "; ".join(changes) if changes else "no field values actually changed"
+    correction_note = f"Manually corrected by {editor}: {change_summary}.{(' Reason: ' + note) if note else ''}"
+
     extraction_result = ExtractionResult(
-        gtin=corrected_gtin.strip() or (last_scan.extracted_gtin if last_scan else None),
-        batch=corrected_batch.strip() or (last_scan.extracted_batch if last_scan else None),
+        gtin=new_gtin,
+        batch=new_batch,
         serials=last_scan.extracted_serials if last_scan else [],
         case_sscc=last_scan.case_sscc if last_scan else None,
         mfg_date=None,
-        exp_date=corrected_expiry.strip() or (last_scan.extracted_expiry if last_scan else None),
+        exp_date=new_expiry,
         scanned_qty=qty_value,
         confidence=1.0, image_quality_ok=True,
-        notes=[f"Manually corrected by reviewer.{(' ' + note) if note else ''}"],
+        notes=[correction_note],
     )
     db.query(ScanEvent).filter(ScanEvent.line_item_id == line_item_id).update({"superseded": True})
     _persist_and_respond(db, line_item, extraction_result, image_ref=last_scan.image_ref if last_scan else None)
     return line_item
+
+
+@router.get("/{line_item_id}/history")
+def scan_history(line_item_id: int, db: Session = Depends(get_db)):
+    """
+    Every ScanEvent ever recorded for this line item, oldest first -
+    including superseded ones (never deleted, only flagged). This is the
+    real edit/audit trail: each entry's own extracted fields and notes
+    show exactly what was recorded and when, and a manual correction's
+    note (see _apply_correction) already states the field-level before/
+    after values and who made the change. No separate history table
+    needed - it's just "all the ScanEvents", read back in order.
+    """
+    line_item = db.query(InvoiceLineItem).filter(InvoiceLineItem.id == line_item_id).first()
+    if not line_item:
+        raise HTTPException(404, f"Line item {line_item_id} not found")
+    events = (
+        db.query(ScanEvent).filter(ScanEvent.line_item_id == line_item_id)
+        .order_by(ScanEvent.created_at.asc()).all()
+    )
+    return [
+        {
+            "id": e.id,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+            "superseded": e.superseded,
+            "is_correction": bool(e.notes) and any("Manually corrected by" in n for n in e.notes),
+            "gtin": e.extracted_gtin,
+            "batch": e.extracted_batch,
+            "expiry": e.extracted_expiry,
+            "scanned_qty": e.scanned_qty,
+            "notes": e.notes or [],
+        }
+        for e in events
+    ]
 
 
 @router.post("/{line_item_id}/correct")
@@ -833,6 +1322,7 @@ def correct_scan(
     corrected_qty: str = Form(""),
     corrected_expiry: str = Form(""),
     note: str = Form(""),
+    reviewer_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """
@@ -848,7 +1338,7 @@ def correct_scan(
     """
     if not any(v.strip() for v in (corrected_gtin, corrected_batch, corrected_qty, corrected_expiry)):
         raise HTTPException(400, "Provide at least one corrected field (gtin, batch, qty, or expiry).")
-    line_item = _apply_correction(db, line_item_id, corrected_gtin, corrected_batch, corrected_qty, corrected_expiry, note)
+    line_item = _apply_correction(db, line_item_id, corrected_gtin, corrected_batch, corrected_qty, corrected_expiry, note, reviewer_name)
     vr = db.query(ValidationResult).filter(ValidationResult.line_item_id == line_item_id).first()
     return _hydrate_with_scan_data(db, vr, line_item)
 
@@ -862,6 +1352,7 @@ def resolve_discrepancy(
     corrected_batch: str = Form(""),
     corrected_qty: str = Form(""),
     corrected_expiry: str = Form(""),
+    reviewer_name: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """
@@ -886,7 +1377,7 @@ def resolve_discrepancy(
         raise HTTPException(404, f"No validation result yet for line item {line_item_id}")
 
     if any(v.strip() for v in (corrected_gtin, corrected_batch, corrected_qty, corrected_expiry)):
-        _apply_correction(db, line_item_id, corrected_gtin, corrected_batch, corrected_qty, corrected_expiry, note)
+        _apply_correction(db, line_item_id, corrected_gtin, corrected_batch, corrected_qty, corrected_expiry, note, reviewer_name)
         vr = db.query(ValidationResult).filter(ValidationResult.line_item_id == line_item_id).first()
 
     vr.resolution_action = action

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { LayoutDashboard, ScanLine, History, UploadCloud, Layers } from "lucide-react";
+import { LayoutDashboard, ScanLine, History, UploadCloud, Settings } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import albathaLogo from "../assets/albatha-logo.png";
 
@@ -10,12 +10,13 @@ const NAV = [
   { to: "/validate-new", label: "Start Validation", icon: ScanLine },
   { to: "/history", label: "History", icon: History },
   { to: "/validate", label: "Upload Invoice", icon: UploadCloud },
-  { to: "/sscc-demo", label: "SSCC Proof", icon: Layers },
+  { to: "/configurations", label: "Configurations", icon: Settings },
 ];
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const visibleNav = user?.allowedNav ? NAV.filter((item) => user.allowedNav!.includes(item.to)) : NAV;
 
   return (
     <div className="h-screen flex overflow-hidden" style={{ background: "var(--color-paper)" }}>
@@ -38,7 +39,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </div>
 
           <nav className="space-y-1">
-            {NAV.map((item) => (
+            {visibleNav.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

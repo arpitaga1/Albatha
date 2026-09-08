@@ -50,6 +50,20 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.75"))
 EXTRACTION_MODE = os.environ.get("EXTRACTION_MODE", "mock")  # "mock" | "live"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
+# Gemini vision extraction (separate, opt-in path from the Anthropic "live"
+# mode above - see app/services/gemini_extraction.py). Real per-call cost
+# same as any hosted vision model, so this is only used when explicitly
+# invoked, not wired into the default scan pipeline.
+#
+# Routed through the user's company LLM gateway (an OpenAI-compatible
+# proxy in front of Gemini), not Google's public API directly - the paid
+# key issued by their IT team only works against this base_url, not
+# generativelanguage.googleapis.com. GEMINI_BASE_URL defaults to Google's
+# own endpoint so a plain Google AI Studio key (no base_url override)
+# still works unmodified if this is ever pointed back at it.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+
 # Real-scan happy-flow guarantee (per explicit user directive): when on, any
 # photo uploaded to /api/scans/upload-real - including a brand-new one
 # captured live from the camera, for any invoice - reports an exact match

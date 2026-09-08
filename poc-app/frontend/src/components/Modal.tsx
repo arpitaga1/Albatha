@@ -13,7 +13,7 @@ import { X } from "lucide-react";
  * is where the detail lives now, on demand.
  */
 export default function Modal({
-  open, onClose, title, children, wide = false, fullScreen = false,
+  open, onClose, title, children, wide = false, fullScreen = false, half = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -21,6 +21,10 @@ export default function Modal({
   children: React.ReactNode;
   wide?: boolean;
   fullScreen?: boolean;
+  // A fixed-size (~85% of viewport), non-scrolling popup for content that
+  // should be visible in one glance (e.g. an image/PDF preview) - smaller
+  // than fullScreen, but doesn't shrink-to-fit content like the default size.
+  half?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -64,6 +68,8 @@ export default function Modal({
             className={
               fullScreen
                 ? "w-full h-full sm:w-[96vw] sm:h-[94vh] rounded-none sm:rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden"
+                : half
+                ? "w-full sm:w-[85vw] sm:h-[85vh] max-w-4xl rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden"
                 : `w-full ${wide ? "max-w-3xl" : "max-w-xl"} max-h-[85vh] rounded-xl bg-white shadow-2xl flex flex-col overflow-hidden`
             }
           >
@@ -80,7 +86,9 @@ export default function Modal({
                 <X size={16} strokeWidth={2.25} />
               </button>
             </div>
-            <div className="p-5 overflow-y-auto">{children}</div>
+            <div className={half ? "flex-1 min-h-0 p-4 flex items-center justify-center overflow-hidden" : "p-5 overflow-y-auto"}>
+              {children}
+            </div>
           </motion.div>
         </motion.div>
       )}

@@ -429,7 +429,14 @@ def finalize_overall_status(result: LineItemValidation) -> None:
         result.overall_status = "red"
     elif result.tatmeen_status == "yellow":
         result.overall_status = "yellow"
-    elif any(f.severity in ("warning", "fail") for f in result.findings):
+    # Rule 10 (expiry-alert) is deliberately excluded from this catch-all,
+    # per user directive: an item that's fully identity-matched, quantity-
+    # matched, and reported on Tatmeen should show as Validated/green in
+    # the shipment summary even if the stock happens to be expired - that's
+    # a real, separate concern (shelf-life), not a reconciliation failure,
+    # and it's already visible on its own as the "Expired" issue tag/finding
+    # rather than needing to also gate the overall status.
+    elif any(f.severity in ("warning", "fail") and f.rule != "10-expiry-alert" for f in result.findings):
         result.overall_status = "yellow"
     else:
         result.overall_status = "green"

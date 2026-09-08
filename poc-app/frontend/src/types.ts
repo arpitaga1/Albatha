@@ -55,7 +55,7 @@ export interface ScannedData {
   serials: string[];
   image_name: string | null;
   annotated_image_name: string | null;
-  method: "barcode" | "opencv" | null;
+  method: "barcode" | "opencv" | "gemini_hybrid" | null;
   notes: string[];
 }
 
@@ -125,6 +125,8 @@ export interface Dashboard {
 export interface ShipmentSummaryRow {
   invoice_number: string;
   demo_flow: number | null;
+  source: "sap" | "upload" | "preloaded";
+  supplier: string;
   invoice_date: string;
   item_count: number;
   scanned_count: number;

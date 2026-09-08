@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Pencil, Check, X, Loader2, ShieldCheck, Clock, CheckCircle2, XCircle } from "lucide-react";
+import { Pencil, Check, X, Loader2, ShieldCheck, Clock, CheckCircle2, XCircle, History } from "lucide-react";
 import StatusDot from "./StatusDot";
 import ItemDetailModal, { type Corrections } from "./ItemDetailModal";
 import { rowStatus } from "../format";
@@ -84,11 +84,11 @@ export default function ItemsTable({
                 <th className="py-2 px-4">Item</th>
                 <th className="py-2 px-4">GTIN</th>
                 <th className="py-2 px-4">Batch</th>
-                <th className="py-2 px-4">Expected Qty</th>
-                {scannedCount > 0 && <th className="py-2 px-4">Scanned Qty</th>}
-                <th className="py-2 px-4">Status</th>
-                {scannedCount > 0 && <th className="py-2 px-4">Tatmeen</th>}
-                {scannedCount > 0 && <th className="py-2 px-4">Issues</th>}
+                <th className="py-2 px-4 text-center">Expected Qty</th>
+                {scannedCount > 0 && <th className="py-2 px-4 text-center">Scanned Qty</th>}
+                <th className="py-2 px-4 text-center">Status</th>
+                {scannedCount > 0 && <th className="py-2 px-4 text-center">Tatmeen</th>}
+                {scannedCount > 0 && <th className="py-2 px-4">Warning</th>}
                 {scannedCount > 0 && <th className="py-2 px-4"></th>}
               </tr>
             </thead>
@@ -101,7 +101,7 @@ export default function ItemsTable({
                   showPostScanColumns={scannedCount > 0}
                   tatmeenRevealed={tatmeenRevealed.has(li.id)}
                   tatmeenChecking={tatmeenChecking.has(li.id)}
-                  onEditQty={(newQty) => onUpdate(li.id, { qty: String(newQty) }, "Scanned quantity corrected inline from the items table.")}
+                  onEditQty={(newQty) => onUpdate(li.id, { qty: String(newQty) }, "")}
                   onOpenDetails={() => openDetails(li.id)}
                 />
               ))}
@@ -178,37 +178,57 @@ function ItemRow({
   // "orange" (a real but non-critical issue, now shown in the Issues
   // column instead) reads as a clean "Matched" here.
   const dotStatus = status === "orange" ? "green" : status;
+  const wasEdited = scanned?.notes?.some((n) => n.includes("Manually corrected by")) ?? false;
 
   return (
     <tr className="border-b last:border-0 hover:bg-[var(--color-paper)] transition-colors" style={{ borderColor: "var(--color-line)" }}>
-      <td className="py-2 px-4 font-medium">{lineItem.item_name}</td>
+      <td className="py-2 px-4 font-medium max-w-[240px]">
+        <span className="block whitespace-normal break-words leading-snug">{lineItem.item_name}</span>
+      </td>
       <td className="py-2 px-4">
         <FieldValue value={lineItem.gtin ?? "-"} mismatch={gtinMismatch} />
       </td>
       <td className="py-2 px-4">
         <FieldValue value={lineItem.batch} mismatch={batchMismatch} />
       </td>
-      <td className="py-2 px-4">{lineItem.qty} {lineItem.uom}</td>
+      <td className="py-2 px-4 text-center">{lineItem.qty}</td>
       {showPostScanColumns && (
         <td className="py-2 px-4">
-          {result ? (
-            <EditableQty value={result.cumulative.total_scanned} uom={lineItem.uom} onSave={onEditQty} />
-          ) : (
-            <span className="text-[var(--color-muted)]">-</span>
-          )}
+          <div className="flex flex-col items-center gap-1">
+            {result ? (
+              <EditableQty value={result.cumulative.total_scanned} onSave={onEditQty} />
+            ) : (
+              <span className="text-[var(--color-muted)]">-</span>
+            )}
+            {wasEdited && (
+              <button
+                onClick={onOpenDetails}
+                className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 w-fit"
+                style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
+                title="This item's data was manually edited - click to see the change log."
+              >
+                <History size={9} strokeWidth={2.5} />
+                Edited
+              </button>
+            )}
+          </div>
         </td>
       )}
       <td className="py-2 px-4">
-        <StatusDot status={dotStatus} />
+        <div className="flex justify-center">
+          <StatusDot status={dotStatus} />
+        </div>
       </td>
       {showPostScanColumns && (
         <td className="py-2 px-4">
-          <TatmeenCell
-            category={lineItem.category}
-            result={result}
-            revealed={tatmeenRevealed}
-            checking={tatmeenChecking}
-          />
+          <div className="flex justify-center">
+            <TatmeenCell
+              category={lineItem.category}
+              result={result}
+              revealed={tatmeenRevealed}
+              checking={tatmeenChecking}
+            />
+          </div>
         </td>
       )}
       {showPostScanColumns && (
@@ -238,7 +258,7 @@ function ItemRow({
               className="text-xs font-semibold whitespace-nowrap"
               style={{ color: hasIssue ? "var(--color-red)" : "var(--color-accent-ink, #0a5e6d)" }}
             >
-              {hasIssue ? "Show Full Details" : "View Details"}
+              View Details
             </button>
           )}
         </td>
@@ -332,7 +352,7 @@ function FieldValue({ value, mismatch }: { value: string; mismatch: boolean }) {
   );
 }
 
-function EditableQty({ value, uom, onSave }: { value: number; uom: string; onSave: (newValue: number) => Promise<void> }) {
+function EditableQty({ value, onSave }: { value: number; onSave: (newValue: number) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(String(value));
   const [saving, setSaving] = useState(false);
@@ -375,7 +395,6 @@ function EditableQty({ value, uom, onSave }: { value: number; uom: string; onSav
           className="w-16 rounded-md border px-1.5 py-1 text-xs mono"
           style={{ borderColor: "var(--color-accent)" }}
         />
-        <span className="text-xs text-[var(--color-muted)]">{uom}</span>
         {saving ? (
           <Loader2 size={13} className="animate-spin" style={{ color: "var(--color-accent)" }} />
         ) : (
@@ -394,7 +413,7 @@ function EditableQty({ value, uom, onSave }: { value: number; uom: string; onSav
       className="inline-flex items-center gap-1 text-xs mono hover:underline"
       title="Click to correct the scanned quantity"
     >
-      {value} {uom}
+      {value}
       <Pencil size={10} strokeWidth={2.5} className="text-[var(--color-muted)]" />
     </button>
   );

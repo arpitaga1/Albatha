@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { FileText, ArrowRight, ArrowLeft, ExternalLink, Image as ImageIcon, Layers, ScanLine, Package, ShieldCheck } from "lucide-react";
+import { FileText, ArrowRight, ArrowLeft, Image as ImageIcon, Layers, ScanLine, Package, ShieldCheck } from "lucide-react";
 import { api, fileUrl } from "../api";
+import { formatApiError } from "../errors";
+import { useAuth } from "../context/AuthContext";
 import ScannerFrame from "./ScannerFrame";
 import RecaptureModal from "./RecaptureModal";
+import AnalyzingModal from "./AnalyzingModal";
+import Modal from "./Modal";
 import ItemsTable from "./ItemsTable";
 import type { Corrections } from "./ItemDetailModal";
 import UnmatchedItemCard from "./UnmatchedItemCard";
@@ -13,6 +17,7 @@ import type { Invoice, RealScanResponse, UnmatchedBarcode, ValidationResult } fr
 type Stage = "scan" | "summary";
 
 export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
+  const { user } = useAuth();
   const [results, setResults] = useState<Record<number, ValidationResult>>({});
   const [unmatched, setUnmatched] = useState<UnmatchedBarcode[]>([]);
   const [files, setFiles] = useState<File[]>([]);
@@ -32,6 +37,9 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
   // "View Image" shortcut. Seeded from whatever's already on the invoice
   // when reopening it, then kept current after every new scan submission.
   const [lastScannedImage, setLastScannedImage] = useState<string | null>(null);
+  // "View Image" / "View Invoice" open a preview popup on this same page
+  // instead of a new browser tab, per user request.
+  const [preview, setPreview] = useState<{ url: string; title: string } | null>(null);
 
   // State persistence: on opening this invoice, load any results that
   // already exist server-side instead of starting blank.
@@ -69,7 +77,10 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
     setError(null);
     setScanMessage(null);
     try {
-      const res: RealScanResponse = await api.uploadRealScan(invoice.invoice_number, files);
+      // Per user directive, the details page's re-scan flow now runs the
+      // same hybrid extraction as "Start Validation" - Gemini vision for
+      // the count, classical barcode/OCR (unchanged) for the field data.
+      const res: RealScanResponse = await api.uploadGeminiScan(invoice.invoice_number, files);
       if (res.results.length === 0 && res.message) {
         // Nothing was recorded server-side - the table stays exactly as
         // it was (nothing to merge in). Show why as a blocking popup with
@@ -93,7 +104,7 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
       setFiles([]);
       setPreviews([]);
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setBusy(false);
     }
@@ -109,12 +120,12 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
   }
 
   async function resolve(lineItemId: number, action: "accepted" | "rejected", note: string) {
-    const r = await api.resolveDiscrepancy(lineItemId, action, note);
+    const r = await api.resolveDiscrepancy(lineItemId, action, note, undefined, user?.name);
     setResults((prev) => ({ ...prev, [lineItemId]: r }));
   }
 
   async function update(lineItemId: number, corrections: Corrections, note: string) {
-    const r = await api.correctScan(lineItemId, corrections, note);
+    const r = await api.correctScan(lineItemId, corrections, note, user?.name);
     setResults((prev) => ({ ...prev, [lineItemId]: r }));
   }
 
@@ -147,6 +158,12 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
   const scannedCount = Object.keys(results).length;
   const invoiceFileUrl = fileUrl(invoice.source_file_name);
   const lastScannedImageUrl = fileUrl(lastScannedImage);
+  // Every line item scanned, and every one's quantity matched - nothing
+  // left to scan for the first time, so the scanner's label reads as a
+  // re-scan action instead of the initial "go scan this" instruction.
+  const allQuantitiesMatched =
+    invoice.line_items.length > 0 &&
+    invoice.line_items.every((li) => results[li.id]?.quantity_status === "green");
 
   // Top-of-page KPI strip - per user request, the same "stat card" pattern
   // already used on Start Validation, summarizing THIS invoice's real
@@ -169,6 +186,9 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
           previously stacked in separate rows well below the heading. */}
       <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
         <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide mb-0.5" style={{ color: "var(--color-muted)" }}>
+            Invoice Number
+          </div>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold">{invoice.invoice_number}</h1>
             <span className="mono text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}>
@@ -190,30 +210,24 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
             )}
             <div className="flex items-center gap-2">
               {lastScannedImageUrl && (
-                <a
-                  href={lastScannedImageUrl}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  onClick={() => setPreview({ url: lastScannedImageUrl, title: "Scanned Photo" })}
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full transition-colors whitespace-nowrap"
                   style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}
                 >
                   <ImageIcon size={12} strokeWidth={2.5} />
                   View Image
-                  <ExternalLink size={11} strokeWidth={2.5} />
-                </a>
+                </button>
               )}
               {invoiceFileUrl && (
-                <a
-                  href={invoiceFileUrl}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  onClick={() => setPreview({ url: invoiceFileUrl, title: "Invoice Document" })}
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full transition-colors whitespace-nowrap"
                   style={{ background: "var(--color-accent-tint, #e2efef)", color: "var(--color-accent-ink, #0a5e6d)" }}
                 >
                   <FileText size={12} strokeWidth={2.5} />
                   View Invoice
-                  <ExternalLink size={11} strokeWidth={2.5} />
-                </a>
+                </button>
               )}
             </div>
           </div>
@@ -256,7 +270,7 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
 
           <div className="mb-6">
             <div className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)] mb-2">
-              Scan box / item - one or multiple photos
+              {allQuantitiesMatched ? "Re-scan box / item - one or multiple photos" : "Scan box / item - one or multiple photos"}
             </div>
             <ScannerFrame
               files={files}
@@ -267,6 +281,8 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
                 busy ? "Decoding barcode(s)…"
                   : error ? "Scan failed"
                   : files.length > 0 ? "Photo(s) captured - ready to scan"
+                  : allQuantitiesMatched
+                  ? "Ready to Re-scan - add one photo, or several, then Re-Scan Photos"
                   : "Ready to scan - add one photo, or several, then Scan Photos"
               }
               statusVariant={busy ? "active" : error ? "error" : files.length > 0 ? "success" : "idle"}
@@ -278,7 +294,11 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
                   className="rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                   style={{ background: "var(--color-accent)" }}
                 >
-                  {busy ? "Decoding…" : files.length > 1 ? `Scan ${files.length} Photos` : "Scan Photo"}
+                  {busy
+                    ? "Decoding…"
+                    : allQuantitiesMatched
+                    ? (files.length > 1 ? `Re-Scan ${files.length} Photos` : "Re-Scan Photo")
+                    : (files.length > 1 ? `Scan ${files.length} Photos` : "Scan Photo")}
                 </button>
               )}
             </ScannerFrame>
@@ -322,6 +342,16 @@ export default function RealScanFlow({ invoice }: { invoice: Invoice }) {
         imagePreview={previews[0] ?? null}
         onRecapture={handleRecapture}
       />
+      <AnalyzingModal active={busy} />
+      <Modal open={preview != null} onClose={() => setPreview(null)} title={preview?.title ?? ""} half>
+        {preview && (
+          preview.url.toLowerCase().endsWith(".pdf") ? (
+            <iframe src={preview.url} title={preview.title} className="w-full h-full border-0" />
+          ) : (
+            <img src={preview.url} alt={preview.title} className="max-w-full max-h-full object-contain" />
+          )
+        )}
+      </Modal>
     </>
   );
 }

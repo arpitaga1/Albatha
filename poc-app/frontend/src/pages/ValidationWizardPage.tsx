@@ -86,7 +86,7 @@ export default function ValidationWizardPage() {
   // page together. ---
   if (invoice.source === "upload" || invoice.source === "preloaded") {
     return (
-      <div className="px-8 py-8 max-w-5xl">
+      <div className="px-8 py-8">
         {invoice.source === "preloaded" ? (
           <Link to="/validate-new" className="text-sm text-[var(--color-accent)] hover:underline">
             ← Start New Validation
@@ -106,7 +106,7 @@ export default function ValidationWizardPage() {
   // --- SAP-sourced invoice (one of the 7 client flows + bonus): existing
   // mock-seed-driven guided wizard, clearly labeled as SAP data. ---
   return (
-    <div className="px-8 py-8 max-w-5xl">
+    <div className="px-8 py-8">
       <Link to="/validate" className="text-sm text-[var(--color-accent)] hover:underline">
         ← Back to Upload Invoice
       </Link>

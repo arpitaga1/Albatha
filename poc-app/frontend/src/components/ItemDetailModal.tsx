@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Image as ImageIcon, ExternalLink, ScanSearch, Pencil, X } from "lucide-react";
+import { Image as ImageIcon, ExternalLink, ScanSearch, Pencil, X, History, User, ArrowRight } from "lucide-react";
 import Modal from "./Modal";
 import StatusBadge from "./StatusBadge";
-import { fileUrl } from "../api";
+import { api, fileUrl } from "../api";
+import { formatApiError } from "../errors";
 import { formatDate } from "../format";
 import type { Finding, LineItem, ValidationResult } from "../types";
 
@@ -12,6 +13,34 @@ export interface Corrections {
   batch?: string;
   qty?: string;
   expiry?: string;
+}
+
+interface ParsedCorrection {
+  editor: string;
+  changes: { field: string; from: string; to: string }[];
+  reason: string | null;
+}
+
+// Parses the backend's single-sentence correction note (see scans.py's
+// _apply_correction, e.g. "Manually corrected by Sara Al Mansoori: Quantity
+// 3 → 4. Reason: recount confirmed.") back into structured pieces, so the
+// Edit History list can render each field change as its own clear row
+// instead of one dense run-on sentence.
+function parseCorrectionNote(note: string): ParsedCorrection | null {
+  const m = note.match(/^Manually corrected by (.+?): (.+?)\.(?: Reason: ([\s\S]*))?$/);
+  if (!m) return null;
+  const [, editor, summaryRaw, reason] = m;
+  const changes: ParsedCorrection["changes"] = [];
+  if (summaryRaw !== "no field values actually changed") {
+    for (const part of summaryRaw.split("; ")) {
+      const cm = part.match(/^(\w+) (.+?) → (.+)$/);
+      if (!cm) continue;
+      const [, field, from, to] = cm;
+      const unquote = (v: string) => v.replace(/^'(.*)'$/, "$1");
+      changes.push({ field, from: unquote(from), to: unquote(to) });
+    }
+  }
+  return { editor, changes, reason: reason || null };
 }
 
 /**
@@ -29,20 +58,22 @@ export interface Corrections {
  * the Tatmeen result once the bulk action has run, exactly as before.
  */
 
+// Recommended Action is deliberately short (a few words) per client
+// feedback - the full explanation lives in the Reason column instead.
 const FIELD_META: Record<string, { field: string; action: string }> = {
-  "2-identity-matching": { field: "Identity (GTIN/Batch)", action: "Verify the scanned label matches the invoice item; re-scan if it may have been misread." },
-  "6-gtin-checksum": { field: "GTIN", action: "Re-scan - the barcode's check digit failed, which usually means a misread." },
-  "7-date-sanity": { field: "Manufacture/Expiry Dates", action: "Re-scan the label - the dates read as inconsistent, likely an OCR/decode error." },
-  "8-quantity-variance": { field: "Quantity", action: "Recount the physical stock and confirm the shortage/overage with the warehouse team." },
-  "9-uom-consistency": { field: "Unit of Measure", action: "Confirm whether the invoice line means cartons or individual units before comparing quantity." },
-  "10-expiry-alert": { field: "Expiry Date", action: "Quarantine the stock - do not proceed with a shipment containing expired product." },
-  "3-duplicate-check": { field: "Serial Number", action: "Investigate - two units in this scan share a serial (possible relabeling or misread)." },
-  "11-cross-scan-duplicates": { field: "Serial Number", action: "Investigate - this serial was already counted in a previous scan for this item." },
-  "14-tatmeen-reported": { field: "Tatmeen Reporting", action: "Contact the supplier to confirm this batch has been reported to Tatmeen." },
-  "18-pending-window": { field: "Tatmeen Reporting", action: "Not reported yet, but within the grace window - check back before escalating." },
-  "15-tatmeen-quantity": { field: "Tatmeen Quantity", action: "Reconcile the quantity Tatmeen has on record against the invoice with the supplier." },
-  "17-sscc-hierarchy": { field: "SSCC", action: "Verify case-level packaging and confirm the SSCC's reported status in Tatmeen." },
-  "4-image-quality-gate": { field: "Image Quality", action: "Retake the photo - straight-on, closer, better lit." },
+  "2-identity-matching": { field: "Identity (GTIN/Batch)", action: "Re-scan & verify" },
+  "6-gtin-checksum": { field: "GTIN", action: "Re-scan barcode" },
+  "7-date-sanity": { field: "Manufacture/Expiry Dates", action: "Re-scan label" },
+  "8-quantity-variance": { field: "Quantity", action: "Recount stock" },
+  "9-uom-consistency": { field: "Unit of Measure", action: "Confirm unit type" },
+  "10-expiry-alert": { field: "Expiry Date", action: "Quarantine stock" },
+  "3-duplicate-check": { field: "Serial Number", action: "Investigate duplicate" },
+  "11-cross-scan-duplicates": { field: "Serial Number", action: "Investigate duplicate" },
+  "14-tatmeen-reported": { field: "Tatmeen Reporting", action: "Confirm with supplier" },
+  "18-pending-window": { field: "Tatmeen Reporting", action: "Check back later" },
+  "15-tatmeen-quantity": { field: "Tatmeen Quantity", action: "Reconcile with supplier" },
+  "17-sscc-hierarchy": { field: "SSCC", action: "Verify packaging" },
+  "4-image-quality-gate": { field: "Image Quality", action: "Retake photo" },
 };
 
 // Whether the invoice's expiry and the scanned expiry actually AGREE with
@@ -68,14 +99,11 @@ function discrepancyRows(lineItem: LineItem, result: ValidationResult) {
       let detected = "-";
       let action = meta.action;
       if (f.rule === "8-quantity-variance") {
-        expected = `${lineItem.qty} ${lineItem.uom}`;
-        detected = `${result.cumulative.total_scanned} ${lineItem.uom}`;
+        expected = `${lineItem.qty}`;
+        detected = `${result.cumulative.total_scanned}`;
         const shortfallRatio = lineItem.qty > 0 ? result.cumulative.total_scanned / lineItem.qty : 1;
         if (shortfallRatio < 0.85) {
-          action = "For a densely packed carton, a gap this size can come from the photo's resolution " +
-            "limiting how many codes are legible, not necessarily missing stock. Retake in closer, " +
-            "smaller sections (fewer boxes per photo) - multiple photos combine into one result " +
-            "automatically - or recount physically if the photo is already as close as possible.";
+          action = "Retake closer photos";
         }
       } else if (f.rule === "2-identity-matching" || f.rule === "6-gtin-checksum") {
         expected = lineItem.gtin ?? lineItem.batch;
@@ -107,7 +135,12 @@ export default function ItemDetailModal({
   // return` guard (which would violate React's Rules of Hooks the moment
   // this component ever renders once without a result and once with one).
   const scanned = result?.scanned;
+  // Two separate reason fields, deliberately not shared - "reason" is the
+  // resolve-a-discrepancy Justification input, "editReason" is the
+  // edit-details toolbar's own optional reason. Typing in one must not
+  // echo into the other.
   const [reason, setReason] = useState("");
+  const [editReason, setEditReason] = useState("");
   const [editing, setEditing] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -115,6 +148,21 @@ export default function ItemDetailModal({
   const [editBatch, setEditBatch] = useState(scanned?.batch ?? "");
   const [editQty, setEditQty] = useState(String(result?.cumulative.total_scanned ?? ""));
   const [editExpiry, setEditExpiry] = useState(scanned?.expiry ?? "");
+  // Edit history: every ScanEvent this line item has ever had, including
+  // superseded ones (see GET /scans/{id}/history) - always visible once the
+  // item has been edited (no click-to-expand), filtered down to just the
+  // human corrections below (not every internal system/OCR note).
+  const [history, setHistory] = useState<Awaited<ReturnType<typeof api.getScanHistory>> | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const wasEdited = scanned?.notes?.some((n) => n.includes("Manually corrected by")) ?? false;
+
+  useEffect(() => {
+    if (!wasEdited || history !== null) return;
+    setHistoryLoading(true);
+    api.getScanHistory(lineItem.id).then(setHistory).finally(() => setHistoryLoading(false));
+  }, [wasEdited, history, lineItem.id]);
+
+  const corrections = (history ?? []).filter((h) => h.is_correction);
 
   if (!result) {
     return (
@@ -143,6 +191,7 @@ export default function ItemDetailModal({
     setEditBatch(scanned?.batch ?? "");
     setEditQty(String(r.cumulative.total_scanned));
     setEditExpiry(scanned?.expiry ?? "");
+    setEditReason("");
     setUpdateError(null);
     setEditing(true);
   }
@@ -151,11 +200,15 @@ export default function ItemDetailModal({
     setUpdating(true);
     setUpdateError(null);
     try {
-      await onUpdate({ gtin: editGtin, batch: editBatch, qty: editQty, expiry: editExpiry }, reason);
+      await onUpdate({ gtin: editGtin, batch: editBatch, qty: editQty, expiry: editExpiry }, editReason);
       setEditing(false);
-      setReason("");
+      setEditReason("");
+      // Force the Edit History section to refetch (it only fetches once,
+      // when null) so the new correction shows up immediately - no page
+      // reload needed.
+      setHistory(null);
     } catch (e) {
-      setUpdateError(String(e));
+      setUpdateError(formatApiError(e));
     } finally {
       setUpdating(false);
     }
@@ -211,13 +264,113 @@ export default function ItemDetailModal({
               No photo available for this scan.
             </div>
           )}
+
+          {wasEdited && (
+            <div className="rounded-lg border p-3 mt-3" style={{ borderColor: "var(--color-line)", background: "var(--color-paper)" }}>
+              <div className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: "var(--color-muted)" }}>
+                Edit History
+              </div>
+              {historyLoading && <p className="text-xs text-[var(--color-muted)]">Loading…</p>}
+              {!historyLoading && corrections.length === 0 && (
+                <p className="text-xs text-[var(--color-muted)]">No manual edits recorded.</p>
+              )}
+              {corrections.length > 0 && (
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {/* Most recent edit first - corrections is fetched oldest-first from the API. */}
+                  {[...corrections].reverse().map((h) => {
+                    const parsed = h.notes.map(parseCorrectionNote).find((p) => p != null);
+                    return (
+                      <div key={h.id} className="rounded-md border bg-white p-2.5" style={{ borderColor: "var(--color-line)" }}>
+                        <div className="flex items-center justify-between gap-2 mb-1.5">
+                          <span className="inline-flex items-center gap-1.5 text-xs font-semibold">
+                            <User size={12} strokeWidth={2.5} style={{ color: "var(--color-muted)" }} />
+                            {parsed?.editor ?? "A reviewer"}
+                          </span>
+                          <span className="text-[10px] shrink-0" style={{ color: "var(--color-muted)" }}>
+                            {h.created_at ? new Date(h.created_at).toLocaleString() : "Unknown time"}
+                          </span>
+                        </div>
+                        {h.superseded && (
+                          <span
+                            className="inline-block text-[9px] font-semibold px-1.5 py-0.5 rounded-full mb-1.5"
+                            style={{ background: "var(--color-line)", color: "var(--color-muted)" }}
+                          >
+                            Superseded
+                          </span>
+                        )}
+                        {parsed && parsed.changes.length > 0 ? (
+                          <div className="flex flex-col gap-1 mb-1">
+                            {parsed.changes.map((c, i) => (
+                              <div key={i} className="flex items-center gap-1.5 text-xs">
+                                <span className="font-medium shrink-0">{c.field}:</span>
+                                <span className="mono line-through" style={{ color: "var(--color-muted)" }}>{c.from}</span>
+                                <ArrowRight size={11} strokeWidth={2.5} style={{ color: "var(--color-muted)" }} className="shrink-0" />
+                                <span className="mono font-semibold" style={{ color: "var(--color-accent-ink, #0a5e6d)" }}>{c.to}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          h.notes.filter((n) => n.includes("Manually corrected by")).map((n, i) => (
+                            <p key={i} className="text-xs mb-1" style={{ color: "var(--color-ink)" }}>{n}</p>
+                          ))
+                        )}
+                        {parsed?.reason && (
+                          <p className="text-xs italic pt-1 mt-1 border-t" style={{ color: "var(--color-muted)", borderColor: "var(--color-line)" }}>
+                            "{parsed.reason}"
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* --- Right: everything else, ~75% --- */}
         <div className="lg:w-3/4 min-w-0">
-      <div className="flex items-center justify-end mb-3">
+      <div className="flex items-center justify-end gap-2 flex-wrap mb-2">
+        {wasEdited && (
+          <span
+            className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full"
+            style={{ background: "var(--color-yellow-tint)", color: "var(--color-yellow)" }}
+            title="This item's data was manually edited - see the edit history below."
+          >
+            <History size={12} strokeWidth={2.5} />
+            Edited
+          </span>
+        )}
         <StatusBadge status={r.overall_status} />
+        {editing && (
+          <input
+            value={editReason}
+            onChange={(e) => setEditReason(e.target.value)}
+            placeholder="Reason for this change (optional)"
+            className="flex-1 min-w-[160px] rounded-md border px-2.5 py-1.5 text-xs"
+            style={{ borderColor: "var(--color-accent)" }}
+          />
+        )}
+        {editing && (
+          <button
+            onClick={submitUpdate}
+            disabled={updating}
+            className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full text-white disabled:opacity-50"
+            style={{ background: "var(--color-accent)" }}
+          >
+            {updating ? "Updating…" : "Update Data"}
+          </button>
+        )}
+        <button
+          onClick={() => (editing ? setEditing(false) : startEditing())}
+          className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full transition-colors"
+          style={{ border: "1px solid var(--color-accent)", color: "var(--color-accent)" }}
+        >
+          {editing ? <X size={11} strokeWidth={2.5} /> : <Pencil size={11} strokeWidth={2.5} />}
+          {editing ? "Cancel edit" : "Edit Details"}
+        </button>
       </div>
+      {updateError && <p className="text-xs mb-2 text-right" style={{ color: "var(--color-red)" }}>{updateError}</p>}
 
       <div className="overflow-x-auto mb-1">
         <table className="w-full text-sm mb-3">
@@ -233,20 +386,25 @@ export default function ItemDetailModal({
             <Row
               label="GTIN"
               invoice={lineItem.gtin ?? "-"}
-              scanned={scanned?.gtin ?? "-"}
+              scanned={editing ? <RowEditInput value={editGtin} onChange={setEditGtin} /> : (scanned?.gtin ?? "-")}
               ok={!lineItem.gtin || !scanned?.gtin ? null : scanned.gtin === lineItem.gtin}
             />
             <Row
               label="Batch"
               invoice={lineItem.batch}
-              scanned={scanned?.batch ?? "-"}
+              scanned={editing ? <RowEditInput value={editBatch} onChange={setEditBatch} /> : (scanned?.batch ?? "-")}
               ok={!lineItem.batch || !scanned?.batch ? null : scanned.batch === lineItem.batch}
             />
-            <Row label="Quantity" invoice={`${lineItem.qty} ${lineItem.uom}`} scanned={`${r.cumulative.total_scanned} ${lineItem.uom}`} ok={r.quantity_status === "green"} />
+            <Row
+              label="Quantity"
+              invoice={`${lineItem.qty}`}
+              scanned={editing ? <RowEditInput value={editQty} onChange={setEditQty} type="number" /> : `${r.cumulative.total_scanned}`}
+              ok={r.quantity_status === "green"}
+            />
             <Row
               label="Expiry Date"
               invoice={formatDate(lineItem.expiry)}
-              scanned={formatDate(scanned?.expiry)}
+              scanned={editing ? <RowEditInput value={editExpiry} onChange={setEditExpiry} placeholder="YYYY-MM-DD" /> : formatDate(scanned?.expiry)}
               ok={expiryAgrees(lineItem.expiry, scanned?.expiry)}
             />
             {lineItem.sscc && (
@@ -258,107 +416,60 @@ export default function ItemDetailModal({
 
       {rows.length > 0 && !resolved && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-lg p-3 mb-3" style={{ background: bannerTint }}>
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-sm font-semibold" style={{ color: bannerColor }}>
-              {isCritical ? "Discrepancies Found - Human Intervention Required" : "Discrepancies Found - Review Recommended"}
-            </div>
-            <button
-              onClick={() => (editing ? setEditing(false) : startEditing())}
-              className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-1 rounded-md"
-              style={editing
-                ? { background: bannerColor, color: "white" }
-                : { border: `1px solid ${bannerColor}`, color: bannerColor }}
-            >
-              {editing ? <X size={11} strokeWidth={2.5} /> : <Pencil size={11} strokeWidth={2.5} />}
-              {editing ? "Cancel edit" : "Edit values"}
-            </button>
+          <div className="text-sm font-semibold mb-2" style={{ color: bannerColor }}>
+            {isCritical ? "Discrepancies Found - Human Intervention Required" : "Discrepancies Found - Review Recommended"}
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs mb-3">
-              <thead>
-                <tr className="text-left" style={{ color: bannerColor }}>
-                  <th className="pb-1 pr-3 font-medium">Field</th>
-                  <th className="pb-1 pr-3 font-medium">Expected</th>
-                  <th className="pb-1 pr-3 font-medium">Detected</th>
-                  <th className="pb-1 pr-3 font-medium">Reason</th>
-                  <th className="pb-1 font-medium">Recommended Action</th>
-                </tr>
-              </thead>
-              <tbody style={{ color: bannerColor }}>
-                {rows.map((row, i) => (
-                  <tr key={i} className="align-top">
-                    <td className="py-1 pr-3 font-medium whitespace-nowrap">{row.field}</td>
-                    <td className="py-1 pr-3 mono whitespace-nowrap">{row.expected}</td>
-                    <td className="py-1 pr-3 mono whitespace-nowrap">{row.detected}</td>
-                    <td className="py-1 pr-3">{row.reason}</td>
-                    <td className="py-1">{row.action}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="grid gap-2 mb-3 sm:grid-cols-2">
+            {rows.map((row, i) => (
+              <div
+                key={i}
+                className="rounded-lg p-2.5"
+                style={{ background: "white", border: `1px solid ${bannerColor}` }}
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
+                  <span
+                    className="text-[11px] font-semibold px-2 py-0.5 rounded-full"
+                    style={{ background: bannerTint, color: bannerColor }}
+                  >
+                    {row.field}
+                  </span>
+                  <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full text-white" style={{ background: bannerColor }}>
+                    {row.action}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs mb-1.5">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--color-muted)" }}>Expected: </span>
+                    <span className="mono">{row.expected}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wide" style={{ color: "var(--color-muted)" }}>Detected: </span>
+                    <span className="mono">{row.detected}</span>
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: "var(--color-muted)" }}>{row.reason}</p>
+              </div>
+            ))}
           </div>
 
-          <AnimatePresence mode="wait">
-            {editing ? (
-              <motion.div key="edit" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <div
-                  className="grid sm:grid-cols-4 gap-2 mb-2 rounded-md p-2.5"
-                  style={{ background: "white", border: `1px solid ${bannerColor}` }}
-                >
-                  <EditField label="GTIN" value={editGtin} onChange={setEditGtin} />
-                  <EditField label="Batch" value={editBatch} onChange={setEditBatch} />
-                  <EditField label="Quantity" value={editQty} onChange={setEditQty} type="number" />
-                  <EditField label="Expiry (YYYY-MM-DD)" value={editExpiry} onChange={setEditExpiry} />
-                </div>
-                <input
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  placeholder="e.g. Corrected batch from a misread barcode - verified against the physical label."
-                  className="w-full rounded-md px-2.5 py-1.5 text-sm mb-2 border"
-                  style={{ borderColor: bannerColor, background: "white" }}
-                />
-                {updateError && <p className="text-xs mb-2" style={{ color: bannerColor }}>{updateError}</p>}
-                <div className="flex gap-2">
-                  <button
-                    onClick={submitUpdate}
-                    disabled={updating}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white disabled:opacity-50"
-                    style={{ background: "var(--color-accent)" }}
-                  >
-                    {updating ? "Updating…" : "Update Data"}
-                  </button>
-                  <button
-                    onClick={() => setEditing(false)}
-                    className="text-xs font-semibold px-3 py-1.5 rounded-lg"
-                    style={{ border: `1px solid ${bannerColor}`, color: bannerColor }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </motion.div>
-            ) : (
-              <motion.div key="resolve" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <label className="block text-xs font-medium mb-1" style={{ color: bannerColor }}>
-                  Justification
-                </label>
-                <input
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  placeholder="e.g. Confirmed 10 physical units on the shelf; short delivery accepted."
-                  className="w-full rounded-md px-2.5 py-1.5 text-sm mb-2 border"
-                  style={{ borderColor: bannerColor, background: "white" }}
-                />
-                <div className="flex gap-2">
-                  <button onClick={() => onResolve("accepted", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white" style={{ background: "var(--color-green)" }}>
-                    Accept
-                  </button>
-                  <button onClick={() => onResolve("rejected", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ border: `1px solid ${bannerColor}`, color: bannerColor }}>
-                    Reject
-                  </button>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+          <label className="block text-xs font-medium mb-1" style={{ color: bannerColor }}>
+            Justification
+          </label>
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. Confirmed 10 physical units on the shelf; short delivery accepted."
+            className="w-full rounded-md px-2.5 py-1.5 text-sm mb-2 border"
+            style={{ borderColor: bannerColor, background: "white" }}
+          />
+          <div className="flex gap-2">
+            <button onClick={() => onResolve("accepted", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg text-white" style={{ background: "var(--color-green)" }}>
+              Accept
+            </button>
+            <button onClick={() => onResolve("rejected", reason)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ border: `1px solid ${bannerColor}`, color: bannerColor }}>
+              Reject
+            </button>
+          </div>
         </motion.div>
       )}
 
@@ -395,6 +506,18 @@ export default function ItemDetailModal({
             <p className="text-xs text-[var(--color-muted)] mt-1">
               {r.findings.find((f) => f.rule.startsWith("14-") || f.rule.startsWith("15-") || f.rule.startsWith("18-"))?.message}
             </p>
+
+            {lineItem.sscc && (
+              <div className="flex items-center gap-2 mt-2.5 pt-2.5 border-t" style={{ borderColor: "var(--color-line)" }}>
+                <StatusBadge status={r.sscc_status} />
+                <span className="text-sm font-medium">
+                  {r.sscc_status === "green" && "SSCC Reported"}
+                  {r.sscc_status === "red" && "SSCC Not Reported"}
+                  {r.sscc_status === "yellow" && "SSCC Reported - pending confirmation"}
+                  {r.sscc_status === "n_a" && "SSCC Not Checked"}
+                </span>
+              </div>
+            )}
           </motion.div>
         )}
         {!tatmeenRevealed && !tatmeenChecking && lineItem.category === "pharma" && (
@@ -410,22 +533,23 @@ export default function ItemDetailModal({
   );
 }
 
-function EditField({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (v: string) => void; type?: string }) {
+// Compact inline input used directly inside the compare table's Scanned
+// column while editing - replaces the old separate "Edit scanned item
+// details" panel, per user feedback (edit in place, not in a new section).
+function RowEditInput({ value, onChange, type = "text", placeholder }: { value: string; onChange: (v: string) => void; type?: string; placeholder?: string }) {
   return (
-    <label className="block">
-      <span className="block text-[10px] font-semibold uppercase tracking-wide mb-0.5" style={{ color: "var(--color-muted)" }}>{label}</span>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-md px-2 py-1.5 text-sm border mono"
-        style={{ borderColor: "var(--color-line)" }}
-      />
-    </label>
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      className="w-full max-w-[160px] rounded-md px-2 py-1 text-xs border mono"
+      style={{ borderColor: "var(--color-accent)" }}
+    />
   );
 }
 
-function Row({ label, invoice, scanned, ok }: { label: string; invoice: string; scanned: string; ok: boolean | null }) {
+function Row({ label, invoice, scanned, ok }: { label: string; invoice: string; scanned: React.ReactNode; ok: boolean | null }) {
   return (
     <tr className="border-t" style={{ borderColor: "var(--color-line)" }}>
       <td className="py-1.5 pr-3 font-medium">{label}</td>

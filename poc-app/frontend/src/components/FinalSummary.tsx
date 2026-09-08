@@ -50,8 +50,20 @@ export default function FinalSummary({
   );
   const tatmeenPending = pharmaScanned.filter((li) => results[li.id].tatmeen_status === "yellow");
 
+  // SSCC (rule 17) is deliberately reported as a non-critical "yellow"
+  // finding at the item level (so its Status dot still reads "Matched" -
+  // see ItemsTable's rowStatus mapping), but that doesn't mean it should be
+  // invisible up here: an item whose SSCC genuinely isn't reported is a
+  // real exception the shipment summary needs to say so about, not silently
+  // fold into "Validation Successful" just because GTIN/qty/Tatmeen all
+  // passed.
+  const ssccApplicable = scanned.filter((li) => li.sscc);
+  const ssccNotReported = ssccApplicable.filter((li) => results[li.id].sscc_status === "red");
+  const ssccPending = ssccApplicable.filter((li) => results[li.id].sscc_status === "yellow");
+
   const anyUnresolvedRed = scanned.some((li) => results[li.id].overall_status === "red" && results[li.id].resolution_action !== "accepted");
-  const anyException = mismatched.length > 0 || tatmeenNotReported.length > 0 || tatmeenFailed.length > 0 || notScanned.length > 0 || extraCount > 0;
+  const anyException = mismatched.length > 0 || tatmeenNotReported.length > 0 || tatmeenFailed.length > 0 ||
+    notScanned.length > 0 || extraCount > 0 || ssccNotReported.length > 0;
 
   let finalResult: { label: string; color: string; bg: string; Icon: typeof CheckCircle2 };
   if (anyUnresolvedRed) {
@@ -77,6 +89,8 @@ export default function FinalSummary({
   if (tatmeenNotReported.length > 0) breakdownParts.push(`${tatmeenNotReported.length} not reported to Tatmeen`);
   if (tatmeenPending.length > 0) breakdownParts.push(`${tatmeenPending.length} pending Tatmeen confirmation`);
   if (tatmeenFailed.length > 0) breakdownParts.push(`${tatmeenFailed.length} Tatmeen check failed`);
+  if (ssccNotReported.length > 0) breakdownParts.push(`${ssccNotReported.length} SSCC not reported`);
+  if (ssccPending.length > 0) breakdownParts.push(`${ssccPending.length} SSCC pending confirmation`);
   const breakdown = breakdownParts.join(" · ");
 
   const invoiceFileUrl = fileUrl(invoice.source_file_name);
@@ -188,6 +202,13 @@ export default function FinalSummary({
           <Line label="Not Reported Items" value={String(tatmeenNotReported.length)} bad={tatmeenNotReported.length > 0} />
           <Line label="Pending Items" value={String(tatmeenPending.length)} />
           <Line label="Failed Validations" value={String(tatmeenFailed.length)} bad={tatmeenFailed.length > 0} />
+          {ssccApplicable.length > 0 && (
+            <>
+              <Line label="SSCC Reported" value={String(ssccApplicable.length - ssccNotReported.length - ssccPending.length)} good />
+              <Line label="SSCC Not Reported" value={String(ssccNotReported.length)} bad={ssccNotReported.length > 0} />
+              {ssccPending.length > 0 && <Line label="SSCC Pending" value={String(ssccPending.length)} />}
+            </>
+          )}
         </SummaryBlock>
       </div>
     </div>

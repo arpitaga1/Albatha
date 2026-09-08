@@ -6,6 +6,7 @@ import {
   Package, PackageSearch, Pill, PlugZap, ScanBarcode, Search, Sparkles, UploadCloud,
 } from "lucide-react";
 import { api } from "../api";
+import { formatApiError } from "../errors";
 import { formatDate } from "../format";
 import UploadDropzone from "../components/UploadDropzone";
 import StatusBadge from "../components/StatusBadge";
@@ -92,7 +93,7 @@ export default function StartValidationPage() {
       const inv = await api.searchSapInvoice(q);
       setSapInvoices((prev) => [inv, ...(prev ?? []).filter((x) => x.invoice_number !== inv.invoice_number)]);
     } catch (e) {
-      setSearchError(String(e));
+      setSearchError(formatApiError(e));
     } finally {
       setSearching(false);
     }
@@ -113,14 +114,14 @@ export default function StartValidationPage() {
       const invoice = await api.uploadInvoice(file);
       navigate(`/validate/${invoice.invoice_number}`);
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="px-8 py-8 max-w-6xl">
+    <div className="px-8 py-8">
       <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }}>
         <div className="flex items-center gap-3 mb-1">
           <div

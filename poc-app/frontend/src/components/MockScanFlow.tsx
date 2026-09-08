@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Camera, Sparkles } from "lucide-react";
 import { api } from "../api";
+import { formatApiError } from "../errors";
+import { useAuth } from "../context/AuthContext";
 import ScannerFrame from "./ScannerFrame";
 import ItemsTable from "./ItemsTable";
 import type { Corrections } from "./ItemDetailModal";
@@ -33,6 +35,7 @@ type Mode = "real" | "simulate";
  *   reported." The photo itself is cosmetic in this mode.
  */
 export default function MockScanFlow({ invoice }: { invoice: Invoice }) {
+  const { user } = useAuth();
   const [mode, setMode] = useState<Mode>("real");
   const [results, setResults] = useState<Record<number, ValidationResult>>({});
   const [unmatched, setUnmatched] = useState<UnmatchedBarcode[]>([]);
@@ -99,7 +102,7 @@ export default function MockScanFlow({ invoice }: { invoice: Invoice }) {
       setUnmatched(res.unmatched);
       clearFiles();
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setBusy(false);
     }
@@ -120,19 +123,19 @@ export default function MockScanFlow({ invoice }: { invoice: Invoice }) {
         return next;
       });
     } catch (e) {
-      setError(String(e));
+      setError(formatApiError(e));
     } finally {
       setBusy(false);
     }
   }
 
   async function resolve(lineItemId: number, action: "accepted" | "rejected", note: string) {
-    const r = await api.resolveDiscrepancy(lineItemId, action, note);
+    const r = await api.resolveDiscrepancy(lineItemId, action, note, undefined, user?.name);
     setResults((prev) => ({ ...prev, [lineItemId]: r }));
   }
 
   async function update(lineItemId: number, corrections: Corrections, note: string) {
-    const r = await api.correctScan(lineItemId, corrections, note);
+    const r = await api.correctScan(lineItemId, corrections, note, user?.name);
     setResults((prev) => ({ ...prev, [lineItemId]: r }));
   }
 

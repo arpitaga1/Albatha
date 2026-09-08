@@ -62,13 +62,25 @@ export const api = {
       j<RealScanResponse>(r)
     );
   },
+  // Gemini 3.5 Flash vision extraction - alternative engine to the classical
+  // barcode/OpenCV pipeline above. Same request/response shape so callers
+  // can swap between the two with no other changes.
+  uploadGeminiScan: (invoiceNumber: string, files: File[]) => {
+    const fd = new FormData();
+    fd.append("invoice_number", invoiceNumber);
+    for (const f of files) fd.append("files", f);
+    return fetch(`${BASE}/scans/upload-gemini`, { method: "POST", body: fd }).then((r) =>
+      j<RealScanResponse>(r)
+    );
+  },
   getResultsForInvoice: (invoiceNumber: string) =>
     fetch(`${BASE}/scans/results/${invoiceNumber}`).then((r) => j<Record<number, ValidationResult>>(r)),
   resolveDiscrepancy: (
     lineItemId: number,
     action: "accepted" | "rejected",
     note: string,
-    corrections?: { gtin?: string; batch?: string; qty?: string; expiry?: string }
+    corrections?: { gtin?: string; batch?: string; qty?: string; expiry?: string },
+    reviewerName?: string
   ) => {
     const fd = new FormData();
     fd.append("action", action);
@@ -77,6 +89,7 @@ export const api = {
     if (corrections?.batch) fd.append("corrected_batch", corrections.batch);
     if (corrections?.qty) fd.append("corrected_qty", corrections.qty);
     if (corrections?.expiry) fd.append("corrected_expiry", corrections.expiry);
+    if (reviewerName) fd.append("reviewer_name", reviewerName);
     return fetch(`${BASE}/scans/${lineItemId}/resolve`, { method: "POST", body: fd }).then((r) =>
       j<ValidationResult>(r)
     );
@@ -84,7 +97,8 @@ export const api = {
   correctScan: (
     lineItemId: number,
     corrections: { gtin?: string; batch?: string; qty?: string; expiry?: string },
-    note: string
+    note: string,
+    reviewerName?: string
   ) => {
     const fd = new FormData();
     if (corrections.gtin) fd.append("corrected_gtin", corrections.gtin);
@@ -92,10 +106,18 @@ export const api = {
     if (corrections.qty) fd.append("corrected_qty", corrections.qty);
     if (corrections.expiry) fd.append("corrected_expiry", corrections.expiry);
     fd.append("note", note);
+    if (reviewerName) fd.append("reviewer_name", reviewerName);
     return fetch(`${BASE}/scans/${lineItemId}/correct`, { method: "POST", body: fd }).then((r) =>
       j<ValidationResult>(r)
     );
   },
+  getScanHistory: (lineItemId: number) =>
+    fetch(`${BASE}/scans/${lineItemId}/history`).then((r) =>
+      j<{
+        id: number; created_at: string | null; superseded: boolean; is_correction: boolean;
+        gtin: string | null; batch: string | null; expiry: string | null; scanned_qty: number; notes: string[];
+      }[]>(r)
+    ),
   manualAssign: (
     invoiceNumber: string,
     lineItemId: number,

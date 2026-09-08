@@ -10,9 +10,9 @@ import StartNewValidationPage from "./pages/StartNewValidationPage";
 import ValidationWizardPage from "./pages/ValidationWizardPage";
 import SsccDemoPage from "./pages/SsccDemoPage";
 
-function Protected({ children }: { children: React.ReactNode }) {
+function Protected({ children, navPath }: { children: React.ReactNode; navPath?: string }) {
   return (
-    <ProtectedRoute>
+    <ProtectedRoute navPath={navPath}>
       <AppShell>{children}</AppShell>
     </ProtectedRoute>
   );
@@ -23,13 +23,15 @@ export default function App() {
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/" element={<Protected><DashboardPage /></Protected>} />
-        <Route path="/dashboard" element={<Protected><DashboardPage /></Protected>} />
-        <Route path="/history" element={<Protected><HistoryPage /></Protected>} />
-        <Route path="/validate" element={<Protected><StartValidationPage /></Protected>} />
-        <Route path="/validate-new" element={<Protected><StartNewValidationPage /></Protected>} />
+        <Route path="/" element={<Protected navPath="/dashboard"><DashboardPage /></Protected>} />
+        <Route path="/dashboard" element={<Protected navPath="/dashboard"><DashboardPage /></Protected>} />
+        <Route path="/history" element={<Protected navPath="/history"><HistoryPage /></Protected>} />
+        <Route path="/validate" element={<Protected navPath="/validate"><StartValidationPage /></Protected>} />
+        <Route path="/validate-new" element={<Protected navPath="/validate-new"><StartNewValidationPage /></Protected>} />
+        {/* No navPath - reached by drilling into an invoice from Start
+            Validation or History, both of which are already gated above. */}
         <Route path="/validate/:invoiceNumber" element={<Protected><ValidationWizardPage /></Protected>} />
-        <Route path="/sscc-demo" element={<Protected><SsccDemoPage /></Protected>} />
+        <Route path="/configurations" element={<Protected navPath="/configurations"><SsccDemoPage /></Protected>} />
       </Routes>
     </AuthProvider>
   );

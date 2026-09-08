@@ -34,7 +34,7 @@ export default function DashboardPage() {
   const tatmeenTotal = (tatmeenCounts.green ?? 0) + (tatmeenCounts.yellow ?? 0) + (tatmeenCounts.red ?? 0);
 
   return (
-    <div className="px-8 py-8 max-w-6xl">
+    <div className="px-8 py-8">
       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}>
         <p className="text-sm text-[var(--color-muted)]">Welcome back, {user?.name?.split(" ")[0]}</p>
         <h1 className="text-2xl font-bold mt-0.5 mb-6">Shipment Validation Dashboard</h1>

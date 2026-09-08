@@ -33,18 +33,53 @@ def all_shipments_summary(db: Session = Depends(get_db)):
 
     for inv in invoices:
         statuses = []
+        # Same real business rule FinalSummary.tsx uses for its 3-tier
+        # verdict (Validated / Completed with Exceptions / Human
+        # Intervention Required) - a line only counts as a real "exception"
+        # for a genuine invoice/quantity mismatch, a Tatmeen not-reported/
+        # failed result, or not being scanned at all. A non-critical finding
+        # (near/already-expired stock, a low-confidence-extraction flag)
+        # already shows up on its own item row - it shouldn't also drag the
+        # WHOLE SHIPMENT down to "yellow" here when every real match/qty/
+        # Tatmeen check actually passed. The previous cruder rule ("any
+        # line's overall_status is yellow => whole invoice yellow") did
+        # exactly that, and it was wrong - confirmed directly: a fully-
+        # matched, fully-Tatmeen-reported invoice with only a confidence-
+        # review or expiry warning was showing "Warning" here even though
+        # FinalSummary would correctly call it "Validation Successful".
+        any_unresolved_red = False
+        any_exception = False
+        any_scanned = False
         for li in inv.line_items:
             category_counts[li.category] = category_counts.get(li.category, 0) + 1
             vr = db.query(ValidationResult).filter(ValidationResult.line_item_id == li.id).first()
             statuses.append(vr.overall_status if vr else "pending")
-            if vr and li.category == "pharma" and vr.tatmeen_status in tatmeen_counts:
+            if not vr:
+                any_exception = True  # not scanned yet
+                continue
+            any_scanned = True
+            if li.category == "pharma" and vr.tatmeen_status in tatmeen_counts:
                 tatmeen_counts[vr.tatmeen_status] += 1
 
-        if not statuses or all(s == "pending" for s in statuses):
+            if vr.overall_status == "red" and vr.resolution_action != "accepted":
+                any_unresolved_red = True
+            mismatched = (vr.invoice_match_status == "red" or vr.quantity_status == "red") and vr.resolution_action != "accepted"
+            tatmeen_failed = any(str(f.get("message", "")).startswith("Tatmeen Validation Failed") for f in (vr.findings or []))
+            tatmeen_not_reported = vr.tatmeen_status == "red" and not tatmeen_failed
+            # SSCC (rule 17) not being reported is a real exception too -
+            # it's deliberately a non-critical "yellow" finding at the item
+            # level (so the item's own Status dot still reads "Matched"),
+            # but that shouldn't let the whole shipment silently read
+            # "Validated" when its SSCC genuinely isn't reported.
+            sscc_not_reported = vr.sscc_status == "red"
+            if mismatched or tatmeen_failed or tatmeen_not_reported or sscc_not_reported:
+                any_exception = True
+
+        if not any_scanned:
             overall = "pending"
-        elif any(s == "red" for s in statuses):
+        elif any_unresolved_red:
             overall = "red"
-        elif any(s in ("yellow", "pending") for s in statuses):
+        elif any_exception:
             overall = "yellow"
         else:
             overall = "green"
@@ -53,6 +88,8 @@ def all_shipments_summary(db: Session = Depends(get_db)):
         rows.append({
             "invoice_number": inv.invoice_number,
             "demo_flow": inv.demo_flow,
+            "source": inv.source,
+            "supplier": inv.supplier,
             "invoice_date": inv.invoice_date,
             "item_count": len(inv.line_items),
             "scanned_count": sum(1 for s in statuses if s != "pending"),
