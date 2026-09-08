@@ -33,11 +33,16 @@ from app import config
 
 GEMINI_MODEL = "gemini-3.5-flash"
 
-# The gateway returns real HTTP status codes and OpenAI-shaped error bodies
-# on failure (429 rate limit / quota, 503 upstream overload) - same
-# transient-failure profile as calling Google directly, so the same
-# retry-with-backoff approach applies unchanged.
-_RETRYABLE_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "rate_limit")
+# Only retry a genuine transient overload (503/UNAVAILABLE) - a 429/rate-
+# limit/quota error is NOT the same kind of failure and must NOT be
+# retried here: retrying immediately just fires more requests into the
+# same limited window that's already rejecting them, making the rate
+# limit take longer to clear instead of backing off from it. A real,
+# confirmed problem: local dev and the deployed backend share one
+# GEMINI_API_KEY, so testing against either counts against the same
+# quota - every retried-into-a-429 attempt was 3x the real damage for 1
+# user click.
+_RETRYABLE_MARKERS = ("503", "UNAVAILABLE")
 _MAX_ATTEMPTS = 3
 _RETRY_DELAY_SECONDS = 4
 

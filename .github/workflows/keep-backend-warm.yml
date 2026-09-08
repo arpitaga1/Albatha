@@ -17,4 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping backend health endpoint
-        run: curl -sf --max-time 30 https://albatha-mpc-backend.onrender.com/api/health
+        # 90s, not 30s - the very first ping after a real cold spin-down
+        # (or after this workflow's own gaps) needs to survive Render's
+        # full wake-up time, or it just times out (exit 28) without ever
+        # actually finishing the wake-up - which then leaves the backend
+        # cold for the next cycle too, instead of fixing itself.
+        run: curl -sf --max-time 90 https://albatha-mpc-backend.onrender.com/api/health
